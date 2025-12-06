@@ -1,0 +1,12 @@
+# secrets
+api_key.txt
+dist/api_key.txt
+.env
+
+# build artifacts
+dist/
+build/
+debug_runs/
+*.exe
+*.zip
+*.pkg
