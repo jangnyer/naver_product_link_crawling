@@ -177,6 +177,13 @@ STOP_REQUESTED = False  # 중단 요청 플래그
 start_fresh_btn = None
 start_resume_btn = None
 
+
+
+RECHECK_INVALID_LINKS = []   # 상세페이지 오류로 보류된 상품들
+RECHECK_FAIL_LINKS = [] 
+
+
+
 def should_stop():
     global STOP_REQUESTED
     if STOP_REQUESTED:
@@ -1549,26 +1556,26 @@ def _has_notice_badge(driver, texts, classes=None):
 def filter_records_by_detail_page(records, driver):
     """
     전체상품/베스트에서 수집한 records 리스트를 받아서
-    각 상품의 상세 페이지를 실제로 열어본 뒤,
-    EXCLUDE_* 옵션에 따라 맞춤제작 / 해외직배송 / 예약구매 / (희망일배송) 등을 체크한다.
+    상품 상세페이지를 열어서 필터링한다.
 
-    - records: [{ "href": ..., "text": ..., ...}, ...]
-    - driver: 현재 검색/스토어 페이지를 열고 있는 webdriver
+    추가:
+    - 상세페이지가 '상품이 존재하지 않습니다' → RECHECK_INVALID_LINKS에 넣고 1차 스킵
     """
-    # 상세 필터 옵션이 하나도 안 켜져 있으면 그냥 바로 리턴
     if not (EXCLUDE_CUSTOM or EXCLUDE_OVERSEAS or EXCLUDE_PREORDER_DETAIL):
         return records
 
     filtered = []
+    global RECHECK_INVALID_LINKS
+
     try:
         main_handle = driver.current_window_handle
     except Exception:
-        # 탭 정보 못 가져오면 그냥 필터링 생략
         return records
 
     for rec in records:
         if should_stop():
             break
+
         href = rec.get("href")
         if not href:
             continue
@@ -1576,66 +1583,91 @@ def filter_records_by_detail_page(records, driver):
         try:
             handles_before = driver.window_handles
 
-            # 새 탭으로 상품 상세 페이지 열기
+            # 🔹 새 탭으로 상세페이지 열기
             driver.execute_script("window.open(arguments[0], '_blank');", href)
             time.sleep(random.uniform(*CLICK_DELAY_RANGE))
 
             handles_after = driver.window_handles
             new_handles = [h for h in handles_after if h not in handles_before]
             if not new_handles:
-                # 새 탭이 안 열렸으면 스킵
                 continue
-
             detail_handle = new_handles[0]
+
             driver.switch_to.window(detail_handle)
 
-            # 캡챠 대응
+            # 🔹 캡챠 처리
             if not handle_captcha_if_needed(driver, client, MAX_RETRY, CLICK_DELAY_RANGE, api_key):
-                # 캡챠를 해결 못하면 이 상품은 그냥 스킵
                 try:
-                    if detail_handle in driver.window_handles:
-                        driver.close()
-                except Exception:
+                    driver.close()
+                except:
                     pass
                 driver.switch_to.window(main_handle)
                 continue
 
-            # ✅ 여기서 상세 HTML 기준으로 필터링
+            # 🔥🔥🔥 추가된 핵심 기능: "상품이 존재하지 않습니다" 감지
+            if is_invalid_product_page(driver):
+                print(f"[RECHECK] 상세페이지 오류 감지 → 나중에 재확인 목록에 추가: {href}")
+                RECHECK_INVALID_LINKS.append(rec)
+                try:
+                    driver.close()
+                except:
+                    pass
+                driver.switch_to.window(main_handle)
+                continue
+            # 🔥🔥🔥 여기까지 추가된 부분
+
+            # 🔹 상세페이지 기반 필터 (맞춤제작, 해외직배송, 예약구매)
             if is_excluded_by_detail_filters(driver):
-                # 맞춤제작 / 예약구매 / 해외직배송 등 옵션에 따라 제외
-                # (is_excluded_by_detail_filters 내부에서 EXCLUDE_* 보고 판단)
+                try:
+                    driver.close()
+                except:
+                    pass
+                driver.switch_to.window(main_handle)
                 continue
 
-            # (원하면 여기서 상세 HTML에서 '희망일배송' 텍스트도 다시 한 번 체크할 수 있음)
-
-            # 통과한 상품만 남김
+            # 🔹 정상 통과 → 필터링된 리스트에 추가
             filtered.append(rec)
 
-        except NoSuchWindowException:
-            print("[WARN] 상세 탭이 예기치 않게 닫혔습니다.")
         except Exception as e:
             print(f"[ERROR] 상세 페이지 필터링 중 오류: {e}")
+
         finally:
-            # 상세 탭 정리 + 메인 탭 복귀
+            # 상세 탭 닫기 + 메인 복귀
             try:
-                cur = driver.current_window_handle
-            except Exception:
-                cur = None
-
-            try:
-                if cur and cur != main_handle and cur in driver.window_handles:
+                if driver.current_window_handle != main_handle:
                     driver.close()
-            except Exception:
+            except:
                 pass
-
             try:
-                if main_handle in driver.window_handles:
-                    driver.switch_to.window(main_handle)
-            except Exception:
+                driver.switch_to.window(main_handle)
+            except:
                 pass
 
-    print(f"[INFO] 상세페이지 기준 필터링 완료: {len(records)}개 → {len(filtered)}개")
+    print(f"[INFO] 상세페이지 필터링 결과: {len(records)}개 → {len(filtered)}개 "
+          f"(재확인 필요 {len(RECHECK_INVALID_LINKS)}개)")
+
     return filtered
+
+
+
+
+
+def is_invalid_product_page(driver):
+    """
+    스마트스토어 상세에서 '상품이 존재하지 않습니다' 페이지인지 판정
+    """
+    try:
+        body_text = driver.page_source
+    except Exception:
+        return False
+
+    # 대표적인 문구들
+    error_keywords = [
+        "상품이 존재하지 않습니다",
+        "요청하신 페이지를 찾을 수 없습니다",
+    ]
+    return any(k in body_text for k in error_keywords)
+
 
 
 
@@ -1844,14 +1876,103 @@ def run_crawler(start_page,
                 save_resume_state(ORIG_START_PAGE, ORIG_END_PAGE, page)
         except Exception as e:
             gui_log(f"[WARN] 재시작 정보 저장 실패: {e}")
+    
+    # 🔥🔥🔥 삭제상품 재확인
+    restored = recheck_invalid_products(driver)
+    if restored:
+        all_records.extend(restored)
+        gui_log(f"[RECHECK] 재확인 성공 상품 {len(restored)}개 복구됨")
+
+    # 복구 후 다시 저장
+    save_to_excel(all_records, excel_filename)
+    save_to_csv(all_records, csv_filename)
+
 
 
     gui_log("=== 수집 종료 ===")
     # ✅ 전체상품 초과 스토어 CSV → XLSX로 마지막에 변환
+
+     # 🔥 재확인 실패 목록 CSV 저장 처리
+    try:
+        if RECHECK_FAIL_LINKS:
+            fail_filename = f"{prefix}_fail.csv"
+            from crawling.output_save.output_save import save_to_csv
+            save_to_csv(RECHECK_FAIL_LINKS, fail_filename)
+            gui_log(f"[FAIL] 재확인 실패 {len(RECHECK_FAIL_LINKS)}개 저장됨 → {fail_filename}")
+        else:
+            gui_log("[INFO] 재확인 실패 상품 없음")
+    except Exception as e:
+        gui_log(f"[ERROR] 재확인 실패 CSV 저장 오류: {e}")
+
     if oversize_csv and oversize_xlsx and os.path.exists(oversize_csv):
         from crawling.output_save.output_save import csv_to_excel
         csv_to_excel(oversize_csv, oversize_xlsx, sheet_name=oversize_sheet)
         gui_log(f"[DONE] '{oversize_sheet}' 엑셀 저장 완료: {oversize_xlsx}")
+
+
+
+
+
+def recheck_invalid_products(driver):
+    """
+    RECHECK_INVALID_LINKS 목록을 다시 열어보고
+    - 이제 정상 페이지면 최종 수집에 포함
+    - 여전히 삭제상품이면 제외
+    """
+    global RECHECK_INVALID_LINKS
+    restored = []
+    if not RECHECK_INVALID_LINKS:
+        return restored
+
+    print(f"[RECHECK] 총 {len(RECHECK_INVALID_LINKS)}개 재확인 시작")
+
+    try:
+        main_handle = driver.current_window_handle
+    except:
+        return restored
+
+    for rec in RECHECK_INVALID_LINKS:
+        href = rec["href"]
+
+        try:
+            handles_before = driver.window_handles
+            driver.execute_script("window.open(arguments[0], '_blank');", href)
+            time.sleep(random.uniform(*CLICK_DELAY_RANGE))
+
+            handles_after = driver.window_handles
+            new_handles = [h for h in handles_after if h not in handles_before]
+            if not new_handles:
+                continue
+
+            h = new_handles[0]
+            driver.switch_to.window(h)
+
+            # 캡챠 처리
+            handle_captcha_if_needed(driver, client, MAX_RETRY, CLICK_DELAY_RANGE, api_key)
+
+            # 🔍 여기서 다시 판정
+            if is_invalid_product_page(driver):
+                print(f"[DELETE] 재확인 실패 → 진짜 삭제상품: {href}")
+            else:
+                print(f"[RESTORE] 재확인 성공 → 정상 수집: {href}")
+                restored.append(rec)
+
+        except Exception as e:
+            print(f"[ERROR] 재확인 중 오류: {href}, {e}")
+
+        finally:
+            try:
+                driver.close()
+            except:
+                pass
+            try:
+                driver.switch_to.window(main_handle)
+            except:
+                pass
+
+    RECHECK_INVALID_LINKS = []  # 초기화
+    return restored
+
 
 
 
