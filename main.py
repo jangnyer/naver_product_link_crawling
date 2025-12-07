@@ -21,7 +21,6 @@ from openai import OpenAI
 from selenium.common.exceptions import WebDriverException
 from tkinter import filedialog
 
-
 from selenium.common.exceptions import NoSuchWindowException
 
 
@@ -117,10 +116,10 @@ FORBIDDEN_CATEGORY_PATHS  = set()  # 예: {"디지털/가전>음향가전>마이
 
 START_URL = "https://search.shopping.naver.com/search/category/100000005"
 SCROLL_COUNT = 5                    # 각 페이지마다 스크롤 5번
-SCROLL_DELAY_RANGE = (1.0, 2.0)     # 스크롤 사이 랜덤 대기 (초)
+SCROLL_DELAY_RANGE = (1.5, 3.0)     # 스크롤 사이 랜덤 대기 (초)
 
 # 👇 클릭 후 기다리는 시간 범위(초) – 필요하면 숫자만 바꿔서 튜닝
-CLICK_DELAY_RANGE = (1.5, 3.0)
+CLICK_DELAY_RANGE = (3.0, 7.0)
 
 client = None
 MAX_RETRY = 10  # 최대 재시도 횟수
@@ -385,6 +384,19 @@ def start_collect(use_resume=True):
     if driver is None:
         messagebox.showerror("에러", "먼저 [카테고리 필터 선택]으로 크롬을 열어주세요.")
         return
+
+        # 🔍 크롬 창이 아직 살아있는지 확인
+    try:
+        _ = driver.current_url  # 창이 닫혔으면 여기서 예외 발생
+    except WebDriverException:
+        messagebox.showerror(
+            "에러",
+            "크롬 창이 이미 닫혀 있습니다.\n"
+            "[카테고리 필터 선택] 버튼을 눌러 크롬을 다시 연 뒤,\n"
+            "카테고리를 다시 선택하고 수집을 시작해주세요."
+        )
+        return
+
 
     global CATEGORY_URL
     try:
@@ -1765,6 +1777,17 @@ def run_crawler(start_page,
         gui_log("[ERROR] driver 가 없습니다. 먼저 [카테고리 필터 선택]을 눌러주세요.")
         return
 
+        # 🔍 driver 세션은 있는데 창이 닫혀 있는 경우 방어
+    try:
+        if not driver.window_handles:
+            gui_log("[ERROR] 크롬 창이 모두 닫혀 있습니다. [카테고리 필터 선택]으로 다시 열어주세요.")
+            return
+    except (WebDriverException, NoSuchWindowException):
+        gui_log("[ERROR] 크롬 창에 접근할 수 없습니다. [카테고리 필터 선택]으로 다시 열어주세요.")
+        return
+
+
+
     # ✅ 수집 시작할 때마다 기준 카테고리 URL로 복귀 (스마트스토어/상세탭에 있어도 정상화)
     try:
         if CATEGORY_URL:
@@ -2485,4 +2508,7 @@ auto_fit_to_content()
 
 if __name__ == "__main__":
     root.mainloop()
+
+
+
 
