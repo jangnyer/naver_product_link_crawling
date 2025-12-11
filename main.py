@@ -16,12 +16,15 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from urllib.parse import urljoin  
 from urllib.parse import urlparse  
+
+
 from selenium.common.exceptions import NoSuchElementException
 from openai import OpenAI
 from selenium.common.exceptions import WebDriverException
 from tkinter import filedialog
 
-from selenium.common.exceptions import NoSuchWindowException
+from selenium.common.exceptions import NoSuchWindowException, InvalidSessionIdException
+
 
 
 from captcha.captcha import (
@@ -437,21 +440,19 @@ def start_collect(use_resume=True):
     ORIG_START_PAGE = start_page
     ORIG_END_PAGE   = end_page
 
-    # 🔹 이전 실행에서 저장된 재시작 정보가 있으면, 그 다음 페이지부터 이어서 시작
     if use_resume:
         resume_info = load_resume_state()
         if resume_info and resume_info["orig_start"] == ORIG_START_PAGE and resume_info["orig_end"] == ORIG_END_PAGE:
-            resume_from = resume_info["last_finished"]
+            resume_from = resume_info["last_finished"] + 1
             if resume_from <= end_page:
                 gui_log(f"[RESUME] 이전 실행에서 {resume_info['last_finished']} 페이지까지 완료 → {resume_from} 페이지부터 이어서 시작합니다.")
                 start_page = resume_from
             else:
-                gui_log("[RESUME] 저장된 재시작 정보가 범위를 벗어나서 무시합니다.")
+                gui_log("[RESUME] 저장된 재시작 정보에 따르면 이미 모든 페이지를 완료했습니다.")
+                return
         else:
             save_resume_state(ORIG_START_PAGE, ORIG_END_PAGE, ORIG_START_PAGE - 1)
-    else:
-        # ✅ 새로 시작은 무조건 '기록 새로 세팅'
-        save_resume_state(ORIG_START_PAGE, ORIG_END_PAGE, ORIG_START_PAGE - 1)
+
 
 
 
@@ -468,6 +469,18 @@ def start_collect(use_resume=True):
     exclude_preorder_detail = exclude_preorder_detail_var.get()
 
     store_collect_mode = store_collect_var.get()
+
+    # ⭐ 수집 개수 제한 옵션 읽기
+    limit_mode = collect_limit_mode.get()
+    limit_value = None
+    if limit_mode == "on":
+        try:
+            v = int(collect_limit_var.get())
+            if v > 0:
+                limit_value = v
+        except:
+            limit_value = None
+
 
 
     # 3) 클릭 간격
@@ -568,6 +581,7 @@ def start_collect(use_resume=True):
                 exclude_overseas=exclude_overseas,
                 exclude_preorder_detail=exclude_preorder_detail,
                 store_collect_mode=store_collect_mode,
+                collect_limit=limit_value,
             )
 
         except Exception as e:
@@ -797,7 +811,7 @@ def collect_best_from_current_store(driver, base_kind, is_brand_catalog,
 
             rec = {
                 "store_url": get_store_home_url(driver.current_url),
-                "store_name": store_name,   # ← 여기도 동일한 store_name 사용
+                "store_name": store_name,
                 "seller_name": seller_name,
                 "total_products": total_cnt,
                 "category_path": category_path
@@ -806,7 +820,6 @@ def collect_best_from_current_store(driver, base_kind, is_brand_catalog,
                 record_oversize_store(rec)
             return []
 
-    # 4) BEST 수집
     # 4) BEST / ALL 모드 분기
     results = []
 
@@ -840,10 +853,11 @@ def collect_best_from_current_store(driver, base_kind, is_brand_catalog,
                 "price_after": item.get("price_after"),
             })
 
-    # ✅ 여기서 4단계: 수집된 링크를 상세페이지 기준으로 다시 필터링
+    # ✅ 상세페이지 기준 필터링
     results = filter_records_by_detail_page(results, driver)
 
     return results
+
 
 
 
@@ -969,27 +983,29 @@ def resolve_smartstore_urls_by_click(driver, link_element, base_kind, is_brand_c
             print("[INFO] smartstore/brandstore/catalog가 아닌 링크라 건너뜁니다.")
 
     finally:
-        # 탭 정리 시, 이미 닫힌 창에 대해 close/switch 시도하다가
-        # NoSuchWindowException 터지지 않도록 방어
         try:
-            if product_handle != main_handle and product_handle in driver.window_handles:
-                # 혹시 다른 탭에 가 있을 수도 있으니 한 번 전환 후 닫기
-                driver.switch_to.window(product_handle)
-                driver.close()
-        except NoSuchWindowException:
-            print("[WARN] product 창이 이미 닫혀 있어서 close() 생략")
-        finally:
-            # 메인 검색창이 아직 살아있으면 그 쪽으로 포커스 복귀
+            handles = driver.window_handles
+        except Exception:
+            return best_records
+
+        if product_handle != main_handle:
             try:
-                if main_handle in driver.window_handles:
-                    driver.switch_to.window(main_handle)
-            except NoSuchWindowException:
-                print("[WARN] main 창도 이미 닫혀 있음 (driver 세션이 끊겼을 수 있음)")
+                if product_handle in handles:
+                    driver.switch_to.window(product_handle)
+                    driver.close()
+            except Exception:
+                pass
+
+        try:
+            handles2 = driver.window_handles
+            if main_handle in handles2:
+                driver.switch_to.window(main_handle)
+        except Exception:
+            pass
 
     return best_records
 
 
-    return best_records
 
 
 
@@ -1221,8 +1237,11 @@ def collect_naver_links(
     csv_filename_for_realtime=None,
     total_product_limit=None,
     record_oversize_store=None,
+    current_total=0,      # ✅ 지금까지 누적된 전체 개수
+    collect_limit=None,   # ✅ 전체 수집 상한
 ):
 
+    global STOP_REQUESTED
 
     records = []
 
@@ -1238,6 +1257,9 @@ def collect_naver_links(
             'div[class^="adProduct_title__"] a[class^="adProduct_link__"]'
         )
         for el in ad_elements:
+
+            if should_stop():
+                break  # 🔹 중단 요청이면 광고 루프 탈출
             if is_preorder_product_link(el):
                 continue
 
@@ -1258,11 +1280,39 @@ def collect_naver_links(
             if should_skip_by_category_path(category_path,FORBIDDEN_CATEGORY_TOKENS=FORBIDDEN_CATEGORY_TOKENS,FORBIDDEN_CATEGORY_PATHS=FORBIDDEN_CATEGORY_PATHS):
                 print(f"[SKIP] 카테고리 금칙어 스킵: {category_path}")
                 continue
-            best_records = resolve_smartstore_urls_by_click(driver, el, base_kind="ad", is_brand_catalog=is_brand,total_product_limit=total_product_limit, record_oversize_store=record_oversize_store,category_path=category_path)
+            best_records = resolve_smartstore_urls_by_click(
+                driver, el,
+                base_kind="ad",
+                is_brand_catalog=is_brand,
+                total_product_limit=total_product_limit,
+                record_oversize_store=record_oversize_store,
+                category_path=category_path,
+            )
+
+            # ✅ 여기서 전체 수집 제한 적용
+            if collect_limit is not None:
+                # 지금까지 전체 + 이 함수 안에서 모은 것까지
+                already = current_total + len(records)
+                remain = collect_limit - already
+
+                if remain <= 0:
+                    # 이미 꽉 찬 상태
+                    STOP_REQUESTED = True
+                    break
+
+                if len(best_records) > remain:
+                    # 필요한 개수만 잘라서 사용
+                    best_records = best_records[:remain]
+                    STOP_REQUESTED = True  # 더 이상 수집하면 안 됨
+
             records.extend(best_records)
 
             if csv_filename_for_realtime and best_records:
                 append_to_csv_incremental(best_records, csv_filename_for_realtime)
+
+            # 🔁 STOP_REQUESTED가 True가 됐으면 바로 광고 루프 끝내기
+            if STOP_REQUESTED:
+                break
 
     # 2) 일반 상품 영역
     product_elements = driver.find_elements(
@@ -1270,6 +1320,8 @@ def collect_naver_links(
         'div[class^="product_title__"] a[class^="product_link__"]'
     )
     for el in product_elements:
+        if should_stop():
+                break  # 🔹 중단 요청이면 광고 루프 탈출
         if is_preorder_product_link(el):
             continue
 
@@ -1288,11 +1340,36 @@ def collect_naver_links(
         if should_skip_by_category_path(category_path,FORBIDDEN_CATEGORY_TOKENS=FORBIDDEN_CATEGORY_TOKENS,FORBIDDEN_CATEGORY_PATHS=FORBIDDEN_CATEGORY_PATHS):
             print(f"[SKIP] 카테고리 금칙어 스킵: {category_path}")
             continue
-        best_records = resolve_smartstore_urls_by_click(driver, el, base_kind="product", is_brand_catalog=is_brand,total_product_limit=total_product_limit, record_oversize_store=record_oversize_store,category_path=category_path)
+
+        best_records = resolve_smartstore_urls_by_click(
+            driver, el,
+            base_kind="product",
+            is_brand_catalog=is_brand,
+            total_product_limit=total_product_limit,
+            record_oversize_store=record_oversize_store,
+            category_path=category_path,
+        )
+
+        # ✅ 여기서도 동일하게 수집 상한 체크
+        if collect_limit is not None:
+            already = current_total + len(records)
+            remain = collect_limit - already
+
+            if remain <= 0:
+                STOP_REQUESTED = True
+                break
+
+            if len(best_records) > remain:
+                best_records = best_records[:remain]
+                STOP_REQUESTED = True
+
         records.extend(best_records)
 
         if csv_filename_for_realtime and best_records:
             append_to_csv_incremental(best_records, csv_filename_for_realtime)
+
+        if STOP_REQUESTED:
+            break
 
     unique = {}
     for r in records:
@@ -1788,6 +1865,7 @@ def run_crawler(start_page,
                 exclude_overseas=False,
                 exclude_preorder_detail=False,
                 store_collect_mode="best",
+                collect_limit=None,
                 ):
 
 
@@ -1897,7 +1975,7 @@ def run_crawler(start_page,
 
     gui_log(f">>> {start_page} 페이지부터 {end_page} 페이지까지 수집 시작")
 
-    for page in range(start_page, end_page):
+    for page in range(start_page, end_page + 1):
         if STOP_REQUESTED:
             gui_log(f"[STOP] {page-1} 페이지부터는 중단합니다.")
             break
@@ -1923,6 +2001,8 @@ def run_crawler(start_page,
         csv_filename_for_realtime=csv_filename,
         total_product_limit=total_product_limit,
         record_oversize_store=record_oversize_store,
+        current_total=len(all_records),   # ✅ 여기까지 모인 총 개수
+        collect_limit=collect_limit,      # ✅ 전체 수집 제한
     )
 
 
@@ -1933,6 +2013,25 @@ def run_crawler(start_page,
             key = (r["href"], r["kind"])
             merged[key] = r
         all_records = list(merged.values())
+
+        # ⭐ 1) 수집 제한 먼저 체크 (저장보다 먼저!)
+        if collect_limit is not None and len(all_records) >= collect_limit:
+            gui_log(f"[STOP] 수집 개수 {collect_limit}개 도달 → 즉시 중단합니다.")
+
+            final_page = page
+            final_excel = build_output_filename(prefix, start_page, final_page, collect_limit, "xlsx")
+            final_csv   = build_output_filename(prefix, start_page, final_page, collect_limit, "csv")
+
+            limited_records = all_records[:collect_limit]
+
+            save_to_excel(limited_records, final_excel)
+            save_to_csv(limited_records, final_csv)
+
+            gui_log(f"[SAVE] 제한된 개수 {collect_limit}개 기준으로 저장 완료: {final_excel}")
+
+            save_resume_state(ORIG_START_PAGE, ORIG_END_PAGE, final_page)
+            return
+
 
         save_to_excel(all_records, excel_filename)
         save_to_csv(all_records, csv_filename)
@@ -1962,7 +2061,7 @@ def run_crawler(start_page,
                 save_resume_state(ORIG_START_PAGE, ORIG_END_PAGE, page)
         except Exception as e:
             gui_log(f"[WARN] 재시작 정보 저장 실패: {e}")
-
+        
 
     gui_log("=== 수집 종료 ===")
     # ======================================================
@@ -2371,6 +2470,22 @@ ttk.Entry(price_frame, textvariable=price_min_var, width=10).grid(row=1, column=
 ttk.Label(price_frame, text="~").grid(row=1, column=2, padx=5, pady=5)
 ttk.Entry(price_frame, textvariable=price_max_var, width=10).grid(row=1, column=3, padx=5, pady=5, sticky="w")
 ttk.Label(price_frame, text="(원)").grid(row=1, column=4, padx=5, pady=5, sticky="w")
+
+
+# 수집 개수 제한
+collect_limit_frame = ttk.LabelFrame(right_col, text="수집 개수 제한")
+collect_limit_frame.pack(fill="x", pady=(0, 10))
+
+collect_limit_mode = tk.StringVar(value="off")  # off / on
+ttk.Radiobutton(collect_limit_frame, text="미사용", variable=collect_limit_mode, value="off").pack(anchor="w", padx=5)
+ttk.Radiobutton(collect_limit_frame, text="사용", variable=collect_limit_mode, value="on").pack(anchor="w", padx=5)
+
+collect_limit_var = tk.IntVar(value=0)
+ttk.Label(collect_limit_frame, text="수집 상한 개수:").pack(anchor="w", padx=5)
+ttk.Entry(collect_limit_frame, textvariable=collect_limit_var, width=10).pack(anchor="w", padx=5)
+
+
+
 
 existing_frame = ttk.LabelFrame(right_col, text="기존 결과 엑셀 업로드 (중복 제외용, 최대 100개)")
 existing_frame.pack(fill="x", pady=(0, 10))
