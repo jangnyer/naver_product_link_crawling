@@ -1,3 +1,5 @@
+# 해외 라벨 제외
+
 import random
 import os
 import time
@@ -16,15 +18,12 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from urllib.parse import urljoin  
 from urllib.parse import urlparse  
-
-
 from selenium.common.exceptions import NoSuchElementException
 from openai import OpenAI
 from selenium.common.exceptions import WebDriverException
 from tkinter import filedialog
 
-from selenium.common.exceptions import NoSuchWindowException, InvalidSessionIdException
-
+from selenium.common.exceptions import NoSuchWindowException
 
 
 from captcha.captcha import (
@@ -115,7 +114,6 @@ FORBIDDEN_OWNER_KEYWORDS  = set()   # 대표자 금칙어
 FORBIDDEN_CATEGORY_KEYWORDS = set()  # 카테고리 금칙어
 FORBIDDEN_CATEGORY_TOKENS = set()  # 예: {"마이크", "음향가전"}
 FORBIDDEN_CATEGORY_PATHS  = set()  # 예: {"디지털/가전>음향가전>마이크"} (옵션)
-FORBIDDEN_BRAND_KEYWORDS = set()
 
 
 START_URL = "https://search.shopping.naver.com/search/category/100000005"
@@ -185,6 +183,37 @@ start_resume_btn = None
 PENDING_RECHECK = []     # 나중에 다시 확인해야 할 URL들
 FAIL_RECORDS   = []      # 정상적으로 열리지 않는 URL들
 
+def is_overseas_label_product_link(link_element):
+    """
+    검색 결과 카드(광고/일반) 내부에 '해외' 라벨이 있으면 True.
+    예: <button class="ad_label__...">해외</button>
+    """
+    try:
+        # 이 링크가 속한 상품 카드(일반/광고)
+        card = link_element.find_element(
+            By.XPATH,
+            './ancestor::div[contains(@class, "product_item__") or contains(@class, "adProduct_item__")][1]'
+        )
+    except Exception:
+        return False
+
+    try:
+        # 카드 내부에서 텍스트가 정확히 "해외"인 라벨 요소 탐지
+        overseas_badges = card.find_elements(
+            By.XPATH,
+            './/button[normalize-space()="해외"] | .//span[normalize-space()="해외"] | .//em[normalize-space()="해외"]'
+        )
+        if overseas_badges:
+            try:
+                name = (link_element.get_attribute("title") or link_element.text or "").strip()
+            except Exception:
+                name = ""
+            print(f"[SKIP] '해외' 라벨 상품이라 수집하지 않음: {name}")
+            return True
+    except Exception:
+        pass
+
+    return False
 
 
 def should_stop():
@@ -440,19 +469,21 @@ def start_collect(use_resume=True):
     ORIG_START_PAGE = start_page
     ORIG_END_PAGE   = end_page
 
+    # 🔹 이전 실행에서 저장된 재시작 정보가 있으면, 그 다음 페이지부터 이어서 시작
     if use_resume:
         resume_info = load_resume_state()
         if resume_info and resume_info["orig_start"] == ORIG_START_PAGE and resume_info["orig_end"] == ORIG_END_PAGE:
-            resume_from = resume_info["last_finished"] + 1
+            resume_from = resume_info["last_finished"]
             if resume_from <= end_page:
                 gui_log(f"[RESUME] 이전 실행에서 {resume_info['last_finished']} 페이지까지 완료 → {resume_from} 페이지부터 이어서 시작합니다.")
                 start_page = resume_from
             else:
-                gui_log("[RESUME] 저장된 재시작 정보에 따르면 이미 모든 페이지를 완료했습니다.")
-                return
+                gui_log("[RESUME] 저장된 재시작 정보가 범위를 벗어나서 무시합니다.")
         else:
             save_resume_state(ORIG_START_PAGE, ORIG_END_PAGE, ORIG_START_PAGE - 1)
-
+    else:
+        # ✅ 새로 시작은 무조건 '기록 새로 세팅'
+        save_resume_state(ORIG_START_PAGE, ORIG_END_PAGE, ORIG_START_PAGE - 1)
 
 
 
@@ -469,18 +500,6 @@ def start_collect(use_resume=True):
     exclude_preorder_detail = exclude_preorder_detail_var.get()
 
     store_collect_mode = store_collect_var.get()
-
-    # ⭐ 수집 개수 제한 옵션 읽기
-    limit_mode = collect_limit_mode.get()
-    limit_value = None
-    if limit_mode == "on":
-        try:
-            v = int(collect_limit_var.get())
-            if v > 0:
-                limit_value = v
-        except:
-            limit_value = None
-
 
 
     # 3) 클릭 간격
@@ -569,7 +588,6 @@ def start_collect(use_resume=True):
                 seller_forbidden_path,
                 owner_forbidden_path,
                 category_forbidden_path=category_forbidden_path,
-                brand_forbidden_path=brand_forbidden_path_var.get().strip() or None,
                 include_ads=include_ads,
                 api_key=api_key,
                 output_name=output_name,
@@ -581,7 +599,6 @@ def start_collect(use_resume=True):
                 exclude_overseas=exclude_overseas,
                 exclude_preorder_detail=exclude_preorder_detail,
                 store_collect_mode=store_collect_mode,
-                collect_limit=limit_value,
             )
 
         except Exception as e:
@@ -811,7 +828,7 @@ def collect_best_from_current_store(driver, base_kind, is_brand_catalog,
 
             rec = {
                 "store_url": get_store_home_url(driver.current_url),
-                "store_name": store_name,
+                "store_name": store_name,   # ← 여기도 동일한 store_name 사용
                 "seller_name": seller_name,
                 "total_products": total_cnt,
                 "category_path": category_path
@@ -820,6 +837,7 @@ def collect_best_from_current_store(driver, base_kind, is_brand_catalog,
                 record_oversize_store(rec)
             return []
 
+    # 4) BEST 수집
     # 4) BEST / ALL 모드 분기
     results = []
 
@@ -853,11 +871,10 @@ def collect_best_from_current_store(driver, base_kind, is_brand_catalog,
                 "price_after": item.get("price_after"),
             })
 
-    # ✅ 상세페이지 기준 필터링
+    # ✅ 여기서 4단계: 수집된 링크를 상세페이지 기준으로 다시 필터링
     results = filter_records_by_detail_page(results, driver)
 
     return results
-
 
 
 
@@ -878,21 +895,6 @@ def create_driver():
         options=options
     )
     return driver
-
-
-def extract_brand_from_detail(driver):
-    """
-    상세 페이지에서 브랜드명을 추출.
-    <th>브랜드</th> 바로 오른쪽 <td> 텍스트를 읽는다.
-    브랜드가 없으면 빈 문자열 반환.
-    """
-    try:
-        th = driver.find_element(By.XPATH, '//th[contains(normalize-space(.),"브랜드")]')
-        td = th.find_element(By.XPATH, 'following-sibling::td[1]')
-        brand = td.text.strip()
-        return brand
-    except Exception:
-        return ""
 
 
 # ===================== 새로 추가된 부분: smartstore 최종 URL 얻기 =====================
@@ -983,29 +985,27 @@ def resolve_smartstore_urls_by_click(driver, link_element, base_kind, is_brand_c
             print("[INFO] smartstore/brandstore/catalog가 아닌 링크라 건너뜁니다.")
 
     finally:
+        # 탭 정리 시, 이미 닫힌 창에 대해 close/switch 시도하다가
+        # NoSuchWindowException 터지지 않도록 방어
         try:
-            handles = driver.window_handles
-        except Exception:
-            return best_records
-
-        if product_handle != main_handle:
+            if product_handle != main_handle and product_handle in driver.window_handles:
+                # 혹시 다른 탭에 가 있을 수도 있으니 한 번 전환 후 닫기
+                driver.switch_to.window(product_handle)
+                driver.close()
+        except NoSuchWindowException:
+            print("[WARN] product 창이 이미 닫혀 있어서 close() 생략")
+        finally:
+            # 메인 검색창이 아직 살아있으면 그 쪽으로 포커스 복귀
             try:
-                if product_handle in handles:
-                    driver.switch_to.window(product_handle)
-                    driver.close()
-            except Exception:
-                pass
-
-        try:
-            handles2 = driver.window_handles
-            if main_handle in handles2:
-                driver.switch_to.window(main_handle)
-        except Exception:
-            pass
+                if main_handle in driver.window_handles:
+                    driver.switch_to.window(main_handle)
+            except NoSuchWindowException:
+                print("[WARN] main 창도 이미 닫혀 있음 (driver 세션이 끊겼을 수 있음)")
 
     return best_records
 
 
+    return best_records
 
 
 
@@ -1237,11 +1237,8 @@ def collect_naver_links(
     csv_filename_for_realtime=None,
     total_product_limit=None,
     record_oversize_store=None,
-    current_total=0,      # ✅ 지금까지 누적된 전체 개수
-    collect_limit=None,   # ✅ 전체 수집 상한
 ):
 
-    global STOP_REQUESTED
 
     records = []
 
@@ -1257,19 +1254,16 @@ def collect_naver_links(
             'div[class^="adProduct_title__"] a[class^="adProduct_link__"]'
         )
         for el in ad_elements:
-
-            if should_stop():
-                break  # 🔹 중단 요청이면 광고 루프 탈출
             if is_preorder_product_link(el):
                 continue
 
             # ⭐ 희망일배송 제외 옵션
             if is_hope_delivery_product_link(el):
-                continue
-
+                continue     
+            
             # ✅ 해외 라벨 있으면 스킵
             if is_overseas_label_product_link(el):
-                continue       
+                continue  
 
 
             href = el.get_attribute("href")
@@ -1284,39 +1278,11 @@ def collect_naver_links(
             if should_skip_by_category_path(category_path,FORBIDDEN_CATEGORY_TOKENS=FORBIDDEN_CATEGORY_TOKENS,FORBIDDEN_CATEGORY_PATHS=FORBIDDEN_CATEGORY_PATHS):
                 print(f"[SKIP] 카테고리 금칙어 스킵: {category_path}")
                 continue
-            best_records = resolve_smartstore_urls_by_click(
-                driver, el,
-                base_kind="ad",
-                is_brand_catalog=is_brand,
-                total_product_limit=total_product_limit,
-                record_oversize_store=record_oversize_store,
-                category_path=category_path,
-            )
-
-            # ✅ 여기서 전체 수집 제한 적용
-            if collect_limit is not None:
-                # 지금까지 전체 + 이 함수 안에서 모은 것까지
-                already = current_total + len(records)
-                remain = collect_limit - already
-
-                if remain <= 0:
-                    # 이미 꽉 찬 상태
-                    STOP_REQUESTED = True
-                    break
-
-                if len(best_records) > remain:
-                    # 필요한 개수만 잘라서 사용
-                    best_records = best_records[:remain]
-                    STOP_REQUESTED = True  # 더 이상 수집하면 안 됨
-
+            best_records = resolve_smartstore_urls_by_click(driver, el, base_kind="ad", is_brand_catalog=is_brand,total_product_limit=total_product_limit, record_oversize_store=record_oversize_store,category_path=category_path)
             records.extend(best_records)
 
             if csv_filename_for_realtime and best_records:
                 append_to_csv_incremental(best_records, csv_filename_for_realtime)
-
-            # 🔁 STOP_REQUESTED가 True가 됐으면 바로 광고 루프 끝내기
-            if STOP_REQUESTED:
-                break
 
     # 2) 일반 상품 영역
     product_elements = driver.find_elements(
@@ -1324,19 +1290,16 @@ def collect_naver_links(
         'div[class^="product_title__"] a[class^="product_link__"]'
     )
     for el in product_elements:
-        if should_stop():
-                break  # 🔹 중단 요청이면 광고 루프 탈출
         if is_preorder_product_link(el):
             continue
 
         # ⭐ 희망일배송은 항상 제외
         if is_hope_delivery_product_link(el):
             continue
-        
+
         # ✅ 해외 라벨 있으면 스킵
         if is_overseas_label_product_link(el):
             continue
-
 
         href = el.get_attribute("href")
         if not href or "javascript:" in href.lower():
@@ -1349,36 +1312,11 @@ def collect_naver_links(
         if should_skip_by_category_path(category_path,FORBIDDEN_CATEGORY_TOKENS=FORBIDDEN_CATEGORY_TOKENS,FORBIDDEN_CATEGORY_PATHS=FORBIDDEN_CATEGORY_PATHS):
             print(f"[SKIP] 카테고리 금칙어 스킵: {category_path}")
             continue
-
-        best_records = resolve_smartstore_urls_by_click(
-            driver, el,
-            base_kind="product",
-            is_brand_catalog=is_brand,
-            total_product_limit=total_product_limit,
-            record_oversize_store=record_oversize_store,
-            category_path=category_path,
-        )
-
-        # ✅ 여기서도 동일하게 수집 상한 체크
-        if collect_limit is not None:
-            already = current_total + len(records)
-            remain = collect_limit - already
-
-            if remain <= 0:
-                STOP_REQUESTED = True
-                break
-
-            if len(best_records) > remain:
-                best_records = best_records[:remain]
-                STOP_REQUESTED = True
-
+        best_records = resolve_smartstore_urls_by_click(driver, el, base_kind="product", is_brand_catalog=is_brand,total_product_limit=total_product_limit, record_oversize_store=record_oversize_store,category_path=category_path)
         records.extend(best_records)
 
         if csv_filename_for_realtime and best_records:
             append_to_csv_incremental(best_records, csv_filename_for_realtime)
-
-        if STOP_REQUESTED:
-            break
 
     unique = {}
     for r in records:
@@ -1421,41 +1359,6 @@ def is_hope_delivery_product_link(link_element):
         pass
 
     return False
-
-
-
-def is_overseas_label_product_link(link_element):
-    """
-    검색 결과 카드(광고/일반) 내부에 '해외' 라벨이 있으면 True.
-    예: <button class="ad_label__...">해외</button>
-    """
-    try:
-        card = link_element.find_element(
-            By.XPATH,
-            './ancestor::div[contains(@class, "product_item__") or contains(@class, "adProduct_item__")][1]'
-        )
-    except Exception:
-        return False
-
-    try:
-        overseas_badges = card.find_elements(
-            By.XPATH,
-            './/button[normalize-space()="해외"] | .//span[normalize-space()="해외"] | .//em[normalize-space()="해외"]'
-        )
-        if overseas_badges:
-            try:
-                name = (link_element.get_attribute("title") or link_element.text or "").strip()
-            except Exception:
-                name = ""
-            print(f"[SKIP] '해외' 라벨 상품이라 수집하지 않음: {name}")
-            return True
-    except Exception:
-        pass
-
-    return False
-
-
-
 
 def collect_all_products_on_all_products_page(driver):
     """
@@ -1727,11 +1630,9 @@ def filter_records_by_detail_page(records, driver):
     - records: [{ "href": ..., "text": ..., ...}, ...]
     - driver: 현재 검색/스토어 페이지를 열고 있는 webdriver
     """
-    # 상세 필터 옵션도 없고, 브랜드 금칙어도 없으면 상세페이지 안 들어감
-    if not (EXCLUDE_CUSTOM or EXCLUDE_OVERSEAS or EXCLUDE_PREORDER_DETAIL or FORBIDDEN_BRAND_KEYWORDS):
+    # 상세 필터 옵션이 하나도 안 켜져 있으면 그냥 바로 리턴
+    if not (EXCLUDE_CUSTOM or EXCLUDE_OVERSEAS or EXCLUDE_PREORDER_DETAIL):
         return records
-
-
 
     filtered = []
     try:
@@ -1807,24 +1708,7 @@ def filter_records_by_detail_page(records, driver):
                 # (is_excluded_by_detail_filters 내부에서 EXCLUDE_* 보고 판단)
                 continue
 
-            # ✅ 브랜드 금칙어 필터
-            if FORBIDDEN_BRAND_KEYWORDS:
-                brand = extract_brand_from_detail(driver)
-                if brand:
-                    blocked = False
-                    for kw in FORBIDDEN_BRAND_KEYWORDS:
-                        if kw and kw in brand:
-                            print(f"[SKIP] 브랜드 금칙어({kw}) 포함 → 제외: {brand} | href={href}")
-                            blocked = True
-                            break
-                    if blocked:
-                        try:
-                            if detail_handle in driver.window_handles:
-                                driver.close()
-                        except Exception:
-                            pass
-                        driver.switch_to.window(main_handle)
-                        continue
+            # (원하면 여기서 상세 HTML에서 '희망일배송' 텍스트도 다시 한 번 체크할 수 있음)
 
             # 통과한 상품만 남김
             filtered.append(rec)
@@ -1854,8 +1738,6 @@ def filter_records_by_detail_page(records, driver):
 
     print(f"[INFO] 상세페이지 기준 필터링 완료: {len(records)}개 → {len(filtered)}개")
     return filtered
-
-
 
 
 
@@ -1897,7 +1779,6 @@ def run_crawler(start_page,
                 seller_forbidden_path=None,
                 owner_forbidden_path=None,
                 category_forbidden_path=None,
-                brand_forbidden_path=None,
                 include_ads=True,
                 api_key=None,
                 output_name="",
@@ -1909,7 +1790,6 @@ def run_crawler(start_page,
                 exclude_overseas=False,
                 exclude_preorder_detail=False,
                 store_collect_mode="best",
-                collect_limit=None,
                 ):
 
 
@@ -1919,7 +1799,7 @@ def run_crawler(start_page,
     - driver: 이미 open_category_selector 에서 열린 상태라고 가정.
     """
 
-    global FORBIDDEN_PRODUCT_KEYWORDS, FORBIDDEN_SELLER_KEYWORDS, FORBIDDEN_OWNER_KEYWORDS, FORBIDDEN_BRAND_KEYWORDS
+    global FORBIDDEN_PRODUCT_KEYWORDS, FORBIDDEN_SELLER_KEYWORDS, FORBIDDEN_OWNER_KEYWORDS
     global VISITED_STORE_KEYS, FORBIDDEN_CATEGORY_KEYWORDS
     global FORBIDDEN_CATEGORY_TOKENS, FORBIDDEN_CATEGORY_PATHS
     global BRAND_CATALOG_MODE
@@ -1969,17 +1849,10 @@ def run_crawler(start_page,
     FORBIDDEN_CATEGORY_KEYWORDS = load_keywords_set_from_path(category_forbidden_path, "카테고리명 금지어")
     FORBIDDEN_CATEGORY_TOKENS, FORBIDDEN_CATEGORY_PATHS = prepare_forbidden_category_sets(FORBIDDEN_CATEGORY_KEYWORDS)
 
-    # 브랜드명
-    FORBIDDEN_BRAND_KEYWORDS = load_keywords_set_from_path(brand_forbidden_path, "브랜드 금지어")
-
-
-    
-
     print("[DEBUG] category tokens:", FORBIDDEN_CATEGORY_TOKENS)
     print("[DEBUG] category paths :", FORBIDDEN_CATEGORY_PATHS)
 
     VISITED_STORE_KEYS = set()
-
 
     # --- 브랜드 카탈로그 모드 설정 (all / first / none) ---
     # include_brand_catalog 인자는 이제 모드 문자열로 들어옴
@@ -2019,7 +1892,7 @@ def run_crawler(start_page,
 
     gui_log(f">>> {start_page} 페이지부터 {end_page} 페이지까지 수집 시작")
 
-    for page in range(start_page, end_page + 1):
+    for page in range(start_page, end_page):
         if STOP_REQUESTED:
             gui_log(f"[STOP] {page-1} 페이지부터는 중단합니다.")
             break
@@ -2045,8 +1918,6 @@ def run_crawler(start_page,
         csv_filename_for_realtime=csv_filename,
         total_product_limit=total_product_limit,
         record_oversize_store=record_oversize_store,
-        current_total=len(all_records),   # ✅ 여기까지 모인 총 개수
-        collect_limit=collect_limit,      # ✅ 전체 수집 제한
     )
 
 
@@ -2057,36 +1928,6 @@ def run_crawler(start_page,
             key = (r["href"], r["kind"])
             merged[key] = r
         all_records = list(merged.values())
-
-        # ⭐ 1) 수집 제한 먼저 체크 (저장보다 먼저!)
-        if collect_limit is not None and len(all_records) >= collect_limit:
-            gui_log(f"[STOP] 수집 개수 {collect_limit}개 도달 → 즉시 중단합니다.")
-
-            final_page = page
-            final_excel = build_output_filename(prefix, start_page, final_page, collect_limit, "xlsx")
-            final_csv   = build_output_filename(prefix, start_page, final_page, collect_limit, "csv")
-
-            limited_records = all_records[:collect_limit]
-
-            save_to_excel(limited_records, final_excel)
-            save_to_csv(limited_records, final_csv)
-
-
-            # 🔥 초기 파일 삭제
-            try:
-                if os.path.exists(excel_filename):
-                    os.remove(excel_filename)
-                if os.path.exists(csv_filename):
-                    os.remove(csv_filename)
-            except Exception as e:
-                gui_log(f"[WARN] 초기 파일 삭제 실패: {e}")
-
-
-            gui_log(f"[SAVE] 제한된 개수 {collect_limit}개 기준으로 저장 완료: {final_excel}")
-
-            save_resume_state(ORIG_START_PAGE, ORIG_END_PAGE, final_page)
-            return
-
 
         save_to_excel(all_records, excel_filename)
         save_to_csv(all_records, csv_filename)
@@ -2116,7 +1957,7 @@ def run_crawler(start_page,
                 save_resume_state(ORIG_START_PAGE, ORIG_END_PAGE, page)
         except Exception as e:
             gui_log(f"[WARN] 재시작 정보 저장 실패: {e}")
-        
+
 
     gui_log("=== 수집 종료 ===")
     # ======================================================
@@ -2483,31 +2324,19 @@ max_click_entry.grid(row=0, column=3, padx=(0, 2), pady=5, sticky="w")
 click_suffix = ttk.Label(time_frame, text="초 사이에 한 번 클릭")
 click_suffix.grid(row=0, column=4, padx=(0, 5), pady=5, sticky="w")
 
-def select_keyword_file(var, label, kind):
+def select_keyword_file(target_var: tk.StringVar, target_label: ttk.Label, label_name: str):
     path = filedialog.askopenfilename(
-        title=f"{kind} 파일 선택",
-        filetypes=[("텍스트 파일", "*.txt")]
+        title=f"{label_name} 텍스트 파일 선택",
+        filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
     )
-    if not path:
-        return
-
-    var.set(path)
-    label.config(text=path)
-    print(f"[INFO] {kind} 파일 선택:", path)
-
-    # 🔥 금칙어 파일 내용도 바로 출력
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read().strip()
-
-        # 세미콜론 기준 split
-        keywords = [kw.strip() for kw in content.split(";") if kw.strip()]
-
-        print(f"[INFO] {kind} 금칙어 목록 ({len(keywords)}개): {keywords}")
-
-    except Exception as e:
-        print(f"[ERROR] {kind} 금칙어 파일을 읽을 수 없음:", e)
-
+    if path:
+        target_var.set(path)
+        target_label.config(text=path)
+        gui_log(f"[INFO] {label_name} 파일 선택: {path}")
+    else:
+        target_var.set("")
+        target_label.config(text="")
+        gui_log(f"[INFO] {label_name} 파일 선택 취소")
 
 price_frame = ttk.LabelFrame(right_col, text="가격 필터 (선택)")
 price_frame.pack(fill="x", pady=(0, 10))
@@ -2525,22 +2354,6 @@ ttk.Entry(price_frame, textvariable=price_min_var, width=10).grid(row=1, column=
 ttk.Label(price_frame, text="~").grid(row=1, column=2, padx=5, pady=5)
 ttk.Entry(price_frame, textvariable=price_max_var, width=10).grid(row=1, column=3, padx=5, pady=5, sticky="w")
 ttk.Label(price_frame, text="(원)").grid(row=1, column=4, padx=5, pady=5, sticky="w")
-
-
-# 수집 개수 제한
-collect_limit_frame = ttk.LabelFrame(right_col, text="수집 개수 제한")
-collect_limit_frame.pack(fill="x", pady=(0, 10))
-
-collect_limit_mode = tk.StringVar(value="off")  # off / on
-ttk.Radiobutton(collect_limit_frame, text="미사용", variable=collect_limit_mode, value="off").pack(anchor="w", padx=5)
-ttk.Radiobutton(collect_limit_frame, text="사용", variable=collect_limit_mode, value="on").pack(anchor="w", padx=5)
-
-collect_limit_var = tk.IntVar(value=0)
-ttk.Label(collect_limit_frame, text="수집 상한 개수:").pack(anchor="w", padx=5)
-ttk.Entry(collect_limit_frame, textvariable=collect_limit_var, width=10).pack(anchor="w", padx=5)
-
-
-
 
 existing_frame = ttk.LabelFrame(right_col, text="기존 결과 엑셀 업로드 (중복 제외용, 최대 100개)")
 existing_frame.pack(fill="x", pady=(0, 10))
@@ -2643,27 +2456,6 @@ ttk.Button(
 
 category_path_label = ttk.Label(category_forbidden_frame, wraplength=400, foreground="blue")
 category_path_label.pack(anchor="w", padx=5, pady=(0, 5))
-
-
-
-
-brand_forbidden_path_var = tk.StringVar(value="")
-
-brand_forbidden_frame = ttk.LabelFrame(right_col, text="브랜드 금칙어 파일 선택 (선택 사항)")
-brand_forbidden_frame.pack(fill="x", pady=(0, 10))
-
-ttk.Button(
-    brand_forbidden_frame,
-    text="브랜드 금칙어 파일 선택 (*.txt)",
-    command=lambda: select_keyword_file(brand_forbidden_path_var, brand_path_label, "브랜드 금칙어")
-).pack(anchor="w", padx=5, pady=5)
-
-brand_path_label = ttk.Label(brand_forbidden_frame, wraplength=400, foreground="blue")
-brand_path_label.pack(anchor="w", padx=5, pady=(0, 5))
-
-
-
-
 
 
 # 🔹 key_entry 만든 바로 아래에 추가
