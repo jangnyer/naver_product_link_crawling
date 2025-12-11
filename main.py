@@ -112,6 +112,7 @@ FORBIDDEN_OWNER_KEYWORDS  = set()   # 대표자 금칙어
 FORBIDDEN_CATEGORY_KEYWORDS = set()  # 카테고리 금칙어
 FORBIDDEN_CATEGORY_TOKENS = set()  # 예: {"마이크", "음향가전"}
 FORBIDDEN_CATEGORY_PATHS  = set()  # 예: {"디지털/가전>음향가전>마이크"} (옵션)
+FORBIDDEN_BRAND_KEYWORDS = set()
 
 
 START_URL = "https://search.shopping.naver.com/search/category/100000005"
@@ -555,6 +556,7 @@ def start_collect(use_resume=True):
                 seller_forbidden_path,
                 owner_forbidden_path,
                 category_forbidden_path=category_forbidden_path,
+                brand_forbidden_path=brand_forbidden_path_var.get().strip() or None,
                 include_ads=include_ads,
                 api_key=api_key,
                 output_name=output_name,
@@ -862,6 +864,21 @@ def create_driver():
         options=options
     )
     return driver
+
+
+def extract_brand_from_detail(driver):
+    """
+    상세 페이지에서 브랜드명을 추출.
+    <th>브랜드</th> 바로 오른쪽 <td> 텍스트를 읽는다.
+    브랜드가 없으면 빈 문자열 반환.
+    """
+    try:
+        th = driver.find_element(By.XPATH, '//th[contains(normalize-space(.),"브랜드")]')
+        td = th.find_element(By.XPATH, 'following-sibling::td[1]')
+        brand = td.text.strip()
+        return brand
+    except Exception:
+        return ""
 
 
 # ===================== 새로 추가된 부분: smartstore 최종 URL 얻기 =====================
@@ -1589,9 +1606,11 @@ def filter_records_by_detail_page(records, driver):
     - records: [{ "href": ..., "text": ..., ...}, ...]
     - driver: 현재 검색/스토어 페이지를 열고 있는 webdriver
     """
-    # 상세 필터 옵션이 하나도 안 켜져 있으면 그냥 바로 리턴
-    if not (EXCLUDE_CUSTOM or EXCLUDE_OVERSEAS or EXCLUDE_PREORDER_DETAIL):
+    # 상세 필터 옵션도 없고, 브랜드 금칙어도 없으면 상세페이지 안 들어감
+    if not (EXCLUDE_CUSTOM or EXCLUDE_OVERSEAS or EXCLUDE_PREORDER_DETAIL or FORBIDDEN_BRAND_KEYWORDS):
         return records
+
+
 
     filtered = []
     try:
@@ -1667,7 +1686,24 @@ def filter_records_by_detail_page(records, driver):
                 # (is_excluded_by_detail_filters 내부에서 EXCLUDE_* 보고 판단)
                 continue
 
-            # (원하면 여기서 상세 HTML에서 '희망일배송' 텍스트도 다시 한 번 체크할 수 있음)
+            # ✅ 브랜드 금칙어 필터
+            if FORBIDDEN_BRAND_KEYWORDS:
+                brand = extract_brand_from_detail(driver)
+                if brand:
+                    blocked = False
+                    for kw in FORBIDDEN_BRAND_KEYWORDS:
+                        if kw and kw in brand:
+                            print(f"[SKIP] 브랜드 금칙어({kw}) 포함 → 제외: {brand} | href={href}")
+                            blocked = True
+                            break
+                    if blocked:
+                        try:
+                            if detail_handle in driver.window_handles:
+                                driver.close()
+                        except Exception:
+                            pass
+                        driver.switch_to.window(main_handle)
+                        continue
 
             # 통과한 상품만 남김
             filtered.append(rec)
@@ -1697,6 +1733,8 @@ def filter_records_by_detail_page(records, driver):
 
     print(f"[INFO] 상세페이지 기준 필터링 완료: {len(records)}개 → {len(filtered)}개")
     return filtered
+
+
 
 
 
@@ -1738,6 +1776,7 @@ def run_crawler(start_page,
                 seller_forbidden_path=None,
                 owner_forbidden_path=None,
                 category_forbidden_path=None,
+                brand_forbidden_path=None,
                 include_ads=True,
                 api_key=None,
                 output_name="",
@@ -1758,7 +1797,7 @@ def run_crawler(start_page,
     - driver: 이미 open_category_selector 에서 열린 상태라고 가정.
     """
 
-    global FORBIDDEN_PRODUCT_KEYWORDS, FORBIDDEN_SELLER_KEYWORDS, FORBIDDEN_OWNER_KEYWORDS
+    global FORBIDDEN_PRODUCT_KEYWORDS, FORBIDDEN_SELLER_KEYWORDS, FORBIDDEN_OWNER_KEYWORDS, FORBIDDEN_BRAND_KEYWORDS
     global VISITED_STORE_KEYS, FORBIDDEN_CATEGORY_KEYWORDS
     global FORBIDDEN_CATEGORY_TOKENS, FORBIDDEN_CATEGORY_PATHS
     global BRAND_CATALOG_MODE
@@ -1808,10 +1847,17 @@ def run_crawler(start_page,
     FORBIDDEN_CATEGORY_KEYWORDS = load_keywords_set_from_path(category_forbidden_path, "카테고리명 금지어")
     FORBIDDEN_CATEGORY_TOKENS, FORBIDDEN_CATEGORY_PATHS = prepare_forbidden_category_sets(FORBIDDEN_CATEGORY_KEYWORDS)
 
+    # 브랜드명
+    FORBIDDEN_BRAND_KEYWORDS = load_keywords_set_from_path(brand_forbidden_path, "브랜드 금지어")
+
+
+    
+
     print("[DEBUG] category tokens:", FORBIDDEN_CATEGORY_TOKENS)
     print("[DEBUG] category paths :", FORBIDDEN_CATEGORY_PATHS)
 
     VISITED_STORE_KEYS = set()
+
 
     # --- 브랜드 카탈로그 모드 설정 (all / first / none) ---
     # include_brand_catalog 인자는 이제 모드 문자열로 들어옴
@@ -2283,19 +2329,31 @@ max_click_entry.grid(row=0, column=3, padx=(0, 2), pady=5, sticky="w")
 click_suffix = ttk.Label(time_frame, text="초 사이에 한 번 클릭")
 click_suffix.grid(row=0, column=4, padx=(0, 5), pady=5, sticky="w")
 
-def select_keyword_file(target_var: tk.StringVar, target_label: ttk.Label, label_name: str):
+def select_keyword_file(var, label, kind):
     path = filedialog.askopenfilename(
-        title=f"{label_name} 텍스트 파일 선택",
-        filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+        title=f"{kind} 파일 선택",
+        filetypes=[("텍스트 파일", "*.txt")]
     )
-    if path:
-        target_var.set(path)
-        target_label.config(text=path)
-        gui_log(f"[INFO] {label_name} 파일 선택: {path}")
-    else:
-        target_var.set("")
-        target_label.config(text="")
-        gui_log(f"[INFO] {label_name} 파일 선택 취소")
+    if not path:
+        return
+
+    var.set(path)
+    label.config(text=path)
+    print(f"[INFO] {kind} 파일 선택:", path)
+
+    # 🔥 금칙어 파일 내용도 바로 출력
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+
+        # 세미콜론 기준 split
+        keywords = [kw.strip() for kw in content.split(";") if kw.strip()]
+
+        print(f"[INFO] {kind} 금칙어 목록 ({len(keywords)}개): {keywords}")
+
+    except Exception as e:
+        print(f"[ERROR] {kind} 금칙어 파일을 읽을 수 없음:", e)
+
 
 price_frame = ttk.LabelFrame(right_col, text="가격 필터 (선택)")
 price_frame.pack(fill="x", pady=(0, 10))
@@ -2415,6 +2473,27 @@ ttk.Button(
 
 category_path_label = ttk.Label(category_forbidden_frame, wraplength=400, foreground="blue")
 category_path_label.pack(anchor="w", padx=5, pady=(0, 5))
+
+
+
+
+brand_forbidden_path_var = tk.StringVar(value="")
+
+brand_forbidden_frame = ttk.LabelFrame(right_col, text="브랜드 금칙어 파일 선택 (선택 사항)")
+brand_forbidden_frame.pack(fill="x", pady=(0, 10))
+
+ttk.Button(
+    brand_forbidden_frame,
+    text="브랜드 금칙어 파일 선택 (*.txt)",
+    command=lambda: select_keyword_file(brand_forbidden_path_var, brand_path_label, "브랜드 금칙어")
+).pack(anchor="w", padx=5, pady=5)
+
+brand_path_label = ttk.Label(brand_forbidden_frame, wraplength=400, foreground="blue")
+brand_path_label.pack(anchor="w", padx=5, pady=(0, 5))
+
+
+
+
 
 
 # 🔹 key_entry 만든 바로 아래에 추가
