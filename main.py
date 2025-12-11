@@ -2027,6 +2027,17 @@ def run_crawler(start_page,
             save_to_excel(limited_records, final_excel)
             save_to_csv(limited_records, final_csv)
 
+
+            # 🔥 초기 파일 삭제
+            try:
+                if os.path.exists(excel_filename):
+                    os.remove(excel_filename)
+                if os.path.exists(csv_filename):
+                    os.remove(csv_filename)
+            except Exception as e:
+                gui_log(f"[WARN] 초기 파일 삭제 실패: {e}")
+
+
             gui_log(f"[SAVE] 제한된 개수 {collect_limit}개 기준으로 저장 완료: {final_excel}")
 
             save_resume_state(ORIG_START_PAGE, ORIG_END_PAGE, final_page)
