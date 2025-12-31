@@ -157,6 +157,7 @@ EXCLUDE_PREORDER_DETAIL = False # (상세페이지 기준) 예약구매 상품 �
 
 
 STORE_COLLECT_MODE = "best"  # "best" or "all"
+USE_BEST_MENU_IN_ALL_MODE = False  # 전체상품 모드에서 BEST 메뉴 클릭 여부
 
 STOP_REQUESTED = False # 중단 요청 플래그
 forbidden_path_var = None  # 금칙어 파일 경로 (나중에 초기화)
@@ -358,7 +359,7 @@ def load_resume_state():
 
 def start_collect(use_resume=True):
     global STOP_REQUESTED, crawl_thread, CLICK_DELAY_RANGE, api_key, client, driver
-    global PRICE_MODE, PRICE_MIN, PRICE_MAX 
+    global PRICE_MODE, PRICE_MIN, PRICE_MAX, USE_BEST_MENU_IN_ALL_MODE 
 
 
     output_name= output_name_var.get().strip()
@@ -469,6 +470,9 @@ def start_collect(use_resume=True):
     exclude_preorder_detail = exclude_preorder_detail_var.get()
 
     store_collect_mode = store_collect_var.get()
+    
+    # ⭐ BEST 메뉴 사용 여부 (전체상품 모드일 때만 적용)
+    USE_BEST_MENU_IN_ALL_MODE = use_best_menu_var.get() if store_collect_mode == "all" else False
 
     # ⭐ 수집 개수 제한 옵션 읽기
     limit_mode = collect_limit_mode.get()
@@ -1016,11 +1020,12 @@ def go_to_all_products_if_exists(driver):
     """
     현재 탭이 스마트스토어 페이지라고 가정하고:
     1) '더보기' 버튼이 보이면 먼저 클릭
-    2) '전체상품' 메뉴를 찾으면 클릭
-    3) 전체상품 페이지로 이동한 뒤, 사용자가 엔터를 누르면
+    2) USE_BEST_MENU_IN_ALL_MODE가 True면 'BEST' 메뉴를 클릭, 아니면 '전체상품' 메뉴를 클릭
+    3) 페이지로 이동한 뒤, 사용자가 엔터를 누르면
        BEST가 붙은 상품들의 상품페이지 URL 목록을 리턴
-    - '전체상품'이 아예 없으면 빈 리스트 리턴
+    - 메뉴가 아예 없으면 빈 리스트 리턴
     """
+    global USE_BEST_MENU_IN_ALL_MODE
     best_urls = []
     try:
         wait = WebDriverWait(driver, 5)
@@ -1041,24 +1046,45 @@ def go_to_all_products_if_exists(driver):
             # 더보기가 없는 경우 / 안 보이는 경우
             pass
 
-        # 2) '전체상품' 링크 찾기 (data-name 또는 텍스트로 검색)
-        try:
-            all_link = driver.find_element(
-                By.XPATH,
-                '//a[@data-name="전체상품" or contains(normalize-space(.), "전체상품")]'
-            )
-        except Exception:
-            print("[INFO] '전체상품' 메뉴가 없는 스마트스토어입니다. 그냥 넘어갑니다.")
-            return []
+        # 2) USE_BEST_MENU_IN_ALL_MODE에 따라 메뉴 선택
+        if USE_BEST_MENU_IN_ALL_MODE:
+            # BEST 메뉴 찾기
+            try:
+                best_link = driver.find_element(
+                    By.XPATH,
+                    '//a[@data-name="BEST" or @data-name="베스트" or contains(normalize-space(.), "BEST") or contains(normalize-space(.), "베스트")]'
+                )
+            except Exception:
+                print("[INFO] 'BEST' 메뉴가 없는 스마트스토어입니다. 그냥 넘어갑니다.")
+                return []
 
-        # 3) '전체상품' 클릭
-        try:
-            driver.execute_script("arguments[0].click();", all_link)
-        except Exception:
-            all_link.click()
+            # BEST 메뉴 클릭
+            try:
+                driver.execute_script("arguments[0].click();", best_link)
+            except Exception:
+                best_link.click()
 
-        print("[INFO] '전체상품' 메뉴 클릭 완료. 페이지 확인 후 BEST 상품을 수집합니다.")
-        time.sleep(random.uniform(*CLICK_DELAY_RANGE))  # 필요하면 2~5초 사이로 조절
+            print("[INFO] 'BEST' 메뉴 클릭 완료. 페이지 확인 후 모든 링크를 수집합니다.")
+            time.sleep(random.uniform(*CLICK_DELAY_RANGE))
+        else:
+            # 전체상품 링크 찾기 (data-name 또는 텍스트로 검색)
+            try:
+                all_link = driver.find_element(
+                    By.XPATH,
+                    '//a[@data-name="전체상품" or contains(normalize-space(.), "전체상품")]'
+                )
+            except Exception:
+                print("[INFO] '전체상품' 메뉴가 없는 스마트스토어입니다. 그냥 넘어갑니다.")
+                return []
+
+            # 전체상품 클릭
+            try:
+                driver.execute_script("arguments[0].click();", all_link)
+            except Exception:
+                all_link.click()
+
+            print("[INFO] '전체상품' 메뉴 클릭 완료. 페이지 확인 후 BEST 상품을 수집합니다.")
+            time.sleep(random.uniform(*CLICK_DELAY_RANGE))  # 필요하면 2~5초 사이로 조절
 
 
 
@@ -2443,7 +2469,7 @@ store_collect_var = tk.StringVar(value="best")  # 기본값 BEST 수집
 
 rb_best = ttk.Radiobutton(
     store_collect_frame,
-    text="BEST 상품만 수집",
+    text="BEST 배너 상품만 수집",
     variable=store_collect_var,
     value="best"
 )
@@ -2456,6 +2482,26 @@ rb_all = ttk.Radiobutton(
     value="all"
 )
 rb_all.pack(anchor="w", padx=5, pady=2)
+
+# BEST 상품 가져오기 체크박스 (전체상품 모드일 때만 활성화)
+use_best_menu_var = tk.BooleanVar(value=False)
+cb_use_best_menu = ttk.Checkbutton(
+    store_collect_frame,
+    text="BEST 카테고리 상품 가져오기",
+    variable=use_best_menu_var,
+    state="disabled"
+)
+cb_use_best_menu.pack(anchor="w", padx=5, pady=2)
+
+# 라디오 버튼 변경 시 체크박스 활성화/비활성화
+def update_best_menu_checkbox_state(*args):
+    if store_collect_var.get() == "all":
+        cb_use_best_menu.config(state="normal")
+    else:
+        cb_use_best_menu.config(state="disabled")
+        use_best_menu_var.set(False)  # 비활성화 시 체크 해제
+
+store_collect_var.trace("w", update_best_menu_checkbox_state)
 
 
 
@@ -2757,7 +2803,6 @@ auto_fit_to_content()
 
 if __name__ == "__main__":
     root.mainloop()
-
 
 
 
