@@ -66,3 +66,6 @@ print("참고: category_path 컬럼은 항상 마지막에 배치됩니다.")
 print("=" * 80)
 
 
+
+
+
