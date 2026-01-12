@@ -70,7 +70,8 @@ from crawling.conditions.exclusion.is_forbidden_seller import(
     should_skip_store_by_seller_keywords
 )
 from crawling.conditions.exclusion.is_store_grade import(
-    has_store_grade
+    has_store_grade,
+    get_store_grade
 )
 from crawling.conditions.exclusion.is_forbidden_store_url import(
     is_forbidden_store_url
@@ -161,7 +162,10 @@ client = None   # ← 여기까지만
 EXCLUDE_CUSTOM = False          # 맞춤제작 상품 제외 여부
 EXCLUDE_OVERSEAS = False        # 해외직배송 상품 제외 여부
 EXCLUDE_PREORDER_DETAIL = False # (상세페이지 기준) 예약구매 상품 제외 여부
-EXCLUDE_STORE_GRADE = False     # 스토어 등급 있는 스토어 제외 여부
+EXCLUDE_STORE_GRADE_PLATINUM = False  # 플래티넘 등급 스토어 제외 여부
+EXCLUDE_STORE_GRADE_PREMIUM = False   # 프리미엄 등급 스토어 제외 여부
+EXCLUDE_STORE_GRADE_BIGPOWER = False  # 빅파워 등급 스토어 제외 여부
+EXCLUDE_STORE_GRADE_POWER = False     # 파워 등급 스토어 제외 여부
 
 STORE_COLLECT_MODE = "best"  # "best" or "all"
 USE_BEST_MENU_IN_ALL_MODE = False  # 전체상품 모드에서 BEST 메뉴 클릭 여부
@@ -467,11 +471,16 @@ def start_collect(use_resume=True):
     include_ads = (ad_option_var.get() == "include")
 
 
-    # ⭐ 2-3) 상세 필터 (맞춤제작 / 해외직배송 / 예약구매 / 스토어 등급)
+    # ⭐ 2-3) 상세 필터 (맞춤제작 / 해외직배송 / 예약구매)
     exclude_custom = exclude_custom_var.get()
     exclude_overseas = exclude_overseas_var.get()
     exclude_preorder_detail = exclude_preorder_detail_var.get()
-    exclude_store_grade = exclude_store_grade_var.get()
+    
+    # ⭐ 2-4) 스토어 등급 필터 (플래티넘, 프리미엄, 빅파워, 파워)
+    exclude_store_grade_platinum = exclude_store_grade_platinum_var.get()
+    exclude_store_grade_premium = exclude_store_grade_premium_var.get()
+    exclude_store_grade_bigpower = exclude_store_grade_bigpower_var.get()
+    exclude_store_grade_power = exclude_store_grade_power_var.get()
 
     store_collect_mode = store_collect_var.get()
     
@@ -590,7 +599,10 @@ def start_collect(use_resume=True):
                 exclude_custom=exclude_custom,
                 exclude_overseas=exclude_overseas,
                 exclude_preorder_detail=exclude_preorder_detail,
-                exclude_store_grade=exclude_store_grade,
+                exclude_store_grade_platinum=exclude_store_grade_platinum,
+                exclude_store_grade_premium=exclude_store_grade_premium,
+                exclude_store_grade_bigpower=exclude_store_grade_bigpower,
+                exclude_store_grade_power=exclude_store_grade_power,
                 store_collect_mode=store_collect_mode,
                 collect_limit=limit_value,
             )
@@ -791,10 +803,22 @@ def collect_best_from_current_store(driver, base_kind, is_brand_catalog,
     VISITED_STORE_KEYS.add(store_key)
     print(f"[STORE] 새 스토어 진입 → {store_key}")
 
-    # 0-1) 스토어 등급이 있으면 제외 (체크박스가 켜져 있을 때만)
-    if EXCLUDE_STORE_GRADE and has_store_grade(driver):
-        print(f"[SKIP] 스토어 등급이 있는 스토어라 제외: {store_key}")
-        return []
+    # 0-1) 스토어 등급 체크 (선택된 등급만 제외)
+    store_grade = get_store_grade(driver)
+    if store_grade:
+        should_exclude = False
+        if store_grade == "플래티넘" and EXCLUDE_STORE_GRADE_PLATINUM:
+            should_exclude = True
+        elif store_grade == "프리미엄" and EXCLUDE_STORE_GRADE_PREMIUM:
+            should_exclude = True
+        elif store_grade == "빅파워" and EXCLUDE_STORE_GRADE_BIGPOWER:
+            should_exclude = True
+        elif store_grade == "파워" and EXCLUDE_STORE_GRADE_POWER:
+            should_exclude = True
+        
+        if should_exclude:
+            print(f"[SKIP] {store_grade} 등급 스토어라 제외: {store_key}")
+            return []
 
     # 0-2) 몰 주소 금칙어 체크
     if FORBIDDEN_STORE_URL_KEYWORDS and is_forbidden_store_url(home_url, FORBIDDEN_STORE_URL_KEYWORDS):
@@ -1952,7 +1976,10 @@ def run_crawler(start_page,
                 exclude_custom=False,
                 exclude_overseas=False,
                 exclude_preorder_detail=False,
-                exclude_store_grade=False,
+                exclude_store_grade_platinum=False,
+                exclude_store_grade_premium=False,
+                exclude_store_grade_bigpower=False,
+                exclude_store_grade_power=False,
                 store_collect_mode="best",
                 collect_limit=None,
                 ):
@@ -1970,12 +1997,17 @@ def run_crawler(start_page,
     global FORBIDDEN_STORE_URL_KEYWORDS
     global BRAND_CATALOG_MODE
 
-    global EXCLUDE_CUSTOM, EXCLUDE_OVERSEAS, EXCLUDE_PREORDER_DETAIL, EXCLUDE_STORE_GRADE
+    global EXCLUDE_CUSTOM, EXCLUDE_OVERSEAS, EXCLUDE_PREORDER_DETAIL
+    global EXCLUDE_STORE_GRADE_PLATINUM, EXCLUDE_STORE_GRADE_PREMIUM
+    global EXCLUDE_STORE_GRADE_BIGPOWER, EXCLUDE_STORE_GRADE_POWER
 
     EXCLUDE_CUSTOM = exclude_custom
     EXCLUDE_OVERSEAS = exclude_overseas
     EXCLUDE_PREORDER_DETAIL = exclude_preorder_detail
-    EXCLUDE_STORE_GRADE = exclude_store_grade
+    EXCLUDE_STORE_GRADE_PLATINUM = exclude_store_grade_platinum
+    EXCLUDE_STORE_GRADE_PREMIUM = exclude_store_grade_premium
+    EXCLUDE_STORE_GRADE_BIGPOWER = exclude_store_grade_bigpower
+    EXCLUDE_STORE_GRADE_POWER = exclude_store_grade_power
 
     global STORE_COLLECT_MODE
     STORE_COLLECT_MODE = store_collect_mode
@@ -2346,7 +2378,10 @@ category_frame.pack(fill="x", pady=(0, 10))
 exclude_custom_var = tk.BooleanVar(value=False)          # 맞춤제작 상품 제외
 exclude_overseas_var = tk.BooleanVar(value=False)        # 해외직배송 상품 제외
 exclude_preorder_detail_var = tk.BooleanVar(value=False) # 예약구매 상품 제외
-exclude_store_grade_var = tk.BooleanVar(value=False)     # 스토어 등급 있는 스토어 제외
+exclude_store_grade_platinum_var = tk.BooleanVar(value=False)  # 플래티넘 등급 스토어 제외
+exclude_store_grade_premium_var = tk.BooleanVar(value=False)   # 프리미엄 등급 스토어 제외
+exclude_store_grade_bigpower_var = tk.BooleanVar(value=False)  # 빅파워 등급 스토어 제외
+exclude_store_grade_power_var = tk.BooleanVar(value=False)     # 파워 등급 스토어 제외
 
 
 def select_forbidden_file():
@@ -2470,12 +2505,37 @@ cb_preorder_detail = ttk.Checkbutton(
 )
 cb_preorder_detail.pack(anchor="w", padx=5, pady=2)
 
-cb_store_grade = ttk.Checkbutton(
-    detail_filter_frame,
-    text="스토어 등급 있는 스토어 제외",
-    variable=exclude_store_grade_var
+# 스토어 등급 필터 (중복 선택 가능)
+store_grade_filter_frame = ttk.LabelFrame(left_col, text="스토어 등급 제외 필터 (중복 선택 가능)")
+store_grade_filter_frame.pack(fill="x", pady=(0, 10))
+
+cb_store_grade_platinum = ttk.Checkbutton(
+    store_grade_filter_frame,
+    text="플래티넘 등급 스토어 제외",
+    variable=exclude_store_grade_platinum_var
 )
-cb_store_grade.pack(anchor="w", padx=5, pady=2)
+cb_store_grade_platinum.pack(anchor="w", padx=5, pady=2)
+
+cb_store_grade_premium = ttk.Checkbutton(
+    store_grade_filter_frame,
+    text="프리미엄 등급 스토어 제외",
+    variable=exclude_store_grade_premium_var
+)
+cb_store_grade_premium.pack(anchor="w", padx=5, pady=2)
+
+cb_store_grade_bigpower = ttk.Checkbutton(
+    store_grade_filter_frame,
+    text="빅파워 등급 스토어 제외",
+    variable=exclude_store_grade_bigpower_var
+)
+cb_store_grade_bigpower.pack(anchor="w", padx=5, pady=2)
+
+cb_store_grade_power = ttk.Checkbutton(
+    store_grade_filter_frame,
+    text="파워 등급 스토어 제외",
+    variable=exclude_store_grade_power_var
+)
+cb_store_grade_power.pack(anchor="w", padx=5, pady=2)
 
 
 
