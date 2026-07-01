@@ -137,6 +137,9 @@ MAX_RETRY = 10  # 최대 재시도 횟수
 
 client = None
 api_key = ""
+NAVER_LOGIN_ID = ""
+NAVER_LOGIN_PW = ""
+NAVER_LOGIN_FILE = "naver_login.json"
 
 PRICE_MODE = "none"
 PRICE_MIN = None
@@ -198,6 +201,36 @@ def should_stop():
         print("[STOP] 사용자 중단 요청 감지 → 즉시 중단")
         return True
     return False
+
+
+def save_naver_login_to_file(user_id: str, user_pw: str):
+    try:
+        with open(NAVER_LOGIN_FILE, "w", encoding="utf-8") as f:
+            json.dump(
+                {"naver_id": user_id.strip(), "naver_pw": user_pw.strip()},
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+        print("[INFO] 네이버 로그인 정보를 파일에 저장했습니다.")
+    except Exception as e:
+        print(f"[WARN] 네이버 로그인 정보 저장 실패: {e}")
+
+
+def load_saved_naver_login():
+    if not os.path.exists(NAVER_LOGIN_FILE):
+        return "", ""
+    try:
+        with open(NAVER_LOGIN_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return "", ""
+        return (
+            str(data.get("naver_id", "")).strip(),
+            str(data.get("naver_pw", "")).strip(),
+        )
+    except Exception:
+        return "", ""
 def prune_debug_runs(base_dir, keep=5):
     try:
         if not os.path.isdir(base_dir):
@@ -364,6 +397,7 @@ def load_resume_state():
 def start_collect(use_resume=True):
     global STOP_REQUESTED, crawl_thread, CLICK_DELAY_RANGE, api_key, client, driver
     global PRICE_MODE, PRICE_MIN, PRICE_MAX, USE_BEST_MENU_IN_ALL_MODE 
+    global NAVER_LOGIN_ID, NAVER_LOGIN_PW
 
 
     output_name= output_name_var.get().strip()
@@ -427,6 +461,11 @@ def start_collect(use_resume=True):
     except Exception as e:
         messagebox.showerror("API 에러", f"API Key 설정 중 오류: {e}")
         return
+
+    NAVER_LOGIN_ID = naver_id_entry.get().strip()
+    NAVER_LOGIN_PW = naver_pw_entry.get().strip()
+    if NAVER_LOGIN_ID or NAVER_LOGIN_PW:
+        save_naver_login_to_file(NAVER_LOGIN_ID, NAVER_LOGIN_PW)
 
     # 1) 페이지 범위
     try:
@@ -787,13 +826,54 @@ def collect_best_products_on_all_products_page(driver):
 
 def collect_best_from_current_store(driver, base_kind, is_brand_catalog,
                                     total_product_limit=None, record_oversize_store=None, category_path=""):
+    try:
+        current_url = driver.current_url
+    except NoSuchWindowException:
+        print("[SKIP] 스토어 탭이 이미 닫혀 있어 건너뜁니다.")
+        return []
+
+    if is_naver_login_page(driver):
+        print(f"[INFO] 스토어 수집 중 네이버 로그인 화면 감지: {current_url}")
+        if not login_to_naver_if_needed(driver):
+            print("[SKIP] 네이버 로그인 실패/미입력으로 스토어 수집을 건너뜁니다.")
+            return []
+        current_url = wait_until_redirect_done(driver)
+        if is_naver_login_page(driver):
+            print(f"[SKIP] 로그인 후에도 로그인 페이지라 스토어 수집을 건너뜁니다: {current_url}")
+            return []
+        if not (
+            current_url.startswith("https://smartstore.naver.com")
+            or current_url.startswith("https://brand.naver.com")
+        ):
+            print(f"[SKIP] 로그인 후 스마트스토어/브랜드스토어가 아닙니다: {current_url}")
+            return []
+
     # 0) 어떤 페이지(상품 상세)로 들어와도 스토어 홈으로 정렬
-    home_url = get_store_home_url(driver.current_url)
-    if home_url != driver.current_url:
+    current_url = driver.current_url
+    home_url = get_store_home_url(current_url)
+    if home_url != current_url:
         driver.get(home_url)
         time.sleep(random.uniform(*CLICK_DELAY_RANGE))
+        if is_naver_login_page(driver):
+            print(f"[INFO] 스토어 홈 이동 후 네이버 로그인 화면 감지: {driver.current_url}")
+            if not login_to_naver_if_needed(driver):
+                print("[SKIP] 네이버 로그인 실패/미입력으로 스토어 수집을 건너뜁니다.")
+                return []
+            if is_naver_login_page(driver):
+                print(f"[SKIP] 로그인 후에도 로그인 페이지라 스토어 수집을 건너뜁니다: {driver.current_url}")
+                return []
 
     store_key = get_store_key(driver.current_url)
+    if "nid.naver.com" in store_key or "nidlogin.login" in store_key:
+        print(f"[INFO] 스토어 키가 네이버 로그인 도메인입니다. 자동 로그인 시도: {store_key}")
+        if not login_to_naver_if_needed(driver):
+            print("[SKIP] 네이버 로그인 실패/미입력으로 스토어 수집을 건너뜁니다.")
+            return []
+        if is_naver_login_page(driver):
+            print(f"[SKIP] 로그인 후에도 로그인 페이지라 스토어 수집을 건너뜁니다: {driver.current_url}")
+            return []
+        store_key = get_store_key(driver.current_url)
+
     if store_key in VISITED_STORE_KEYS:
         print(f"[SKIP] 이미 BEST를 수집한 스토어입니다: {store_key}")
         return []
@@ -999,6 +1079,28 @@ def get_installed_chrome_major_version():
     return major_version
 
 
+def get_chrome_profile_dir():
+    profile_base = os.path.join(get_app_storage_dir(), "chrome_profiles")
+    os.makedirs(profile_base, exist_ok=True)
+
+    try:
+        dirs = [os.path.join(profile_base, d) for d in os.listdir(profile_base)]
+        dirs = [d for d in dirs if os.path.isdir(d)]
+        dirs.sort(key=lambda p: os.path.getmtime(p))
+        while len(dirs) > 5:
+            old = dirs.pop(0)
+            try:
+                shutil.rmtree(old, ignore_errors=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    profile_dir = os.path.join(profile_base, f"profile_{os.getpid()}_{int(time.time())}")
+    os.makedirs(profile_dir, exist_ok=True)
+    return profile_dir
+
+
 def build_chrome_options():
     options = uc.ChromeOptions()
 
@@ -1008,6 +1110,7 @@ def build_chrome_options():
     options.add_argument("--profile-directory=Default")
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
+    options.add_argument("--disable-popup-blocking")
     options.add_argument("--disable-sync")
     options.add_argument("--disable-signin-promo")
     options.add_argument("--disable-features=CalculateNativeWinOcclusion,ProfilePickerOnStartup")
@@ -1022,6 +1125,7 @@ def build_chrome_options():
         "credentials_enable_service": False,
         "profile.password_manager_enabled": False,
         "profile.default_content_setting_values.notifications": 2,
+        "profile.default_content_setting_values.popups": 1,
     }
     options.add_experimental_option("prefs", prefs)
 
@@ -1035,7 +1139,7 @@ def build_chrome_kwargs(version_main=None):
 
     chrome_kwargs = {
         "options": build_chrome_options(),
-        "user_data_dir": os.path.join(get_app_storage_dir(), "chrome_profile"),
+        "user_data_dir": get_chrome_profile_dir(),
         "use_subprocess": True,
         "patcher_force_close": True,
     }
@@ -1054,7 +1158,9 @@ def create_driver():
         gui_log(f"[INFO] Chrome 버전 감지: {chrome_major_version}")
 
     try:
+        gui_log("[INFO] Chrome 브라우저를 여는 중입니다...")
         driver = uc.Chrome(**chrome_kwargs)
+        gui_log("[INFO] Chrome 브라우저 실행 완료")
     except SessionNotCreatedException as e:
         match = re.search(r"Current browser version is (\d+)\.", str(e))
         if match:
@@ -1062,6 +1168,7 @@ def create_driver():
             gui_log(f"[INFO] Chrome {detected_major} 버전에 맞는 드라이버로 자동 재설정합니다. 잠시만 기다려주세요.")
             try:
                 chrome_kwargs, _ = build_chrome_kwargs(version_main=detected_major)
+                gui_log("[INFO] Chrome 브라우저를 다시 여는 중입니다...")
                 driver = uc.Chrome(**chrome_kwargs)
                 gui_log("[INFO] Chrome 브라우저 재시작 완료")
             except Exception as retry_error:
@@ -1137,12 +1244,20 @@ def resolve_smartstore_urls_by_click(driver, link_element, base_kind, is_brand_c
     if is_skip_mall_for_link(link_element):
         # 로그는 is_skip_mall_for_link 안에서 출력됨
         return []
+
+    try:
+        original_href = link_element.get_attribute("href") or ""
+    except Exception:
+        original_href = ""
     
     main_handle = driver.current_window_handle
     handles_before = driver.window_handles
 
-    # 실제 클릭으로 새 탭/창 열기
-    driver.execute_script("arguments[0].click();", link_element)
+    # 광고/추적 링크가 현재 검색 탭을 로그인 페이지로 바꾸는 것을 막기 위해 새 탭으로 엽니다.
+    if original_href and not original_href.lower().startswith("javascript:"):
+        driver.execute_script("window.open(arguments[0], '_blank');", original_href)
+    else:
+        driver.execute_script("arguments[0].click();", link_element)
     time.sleep(random.uniform(*CLICK_DELAY_RANGE))
 
     handles_after = driver.window_handles
@@ -1168,6 +1283,15 @@ def resolve_smartstore_urls_by_click(driver, link_element, base_kind, is_brand_c
     try:
         final_url = wait_until_redirect_done(driver)
 
+        if is_naver_login_page(driver):
+            print(f"[INFO] 네이버 로그인 페이지 감지: {original_href} -> {final_url}")
+            if not login_to_naver_if_needed(driver):
+                print("[SKIP] 네이버 로그인 실패/미입력으로 건너뜁니다.")
+                return best_records
+            final_url = wait_until_redirect_done(driver)
+            if is_naver_login_page(driver):
+                print(f"[SKIP] 로그인 후에도 네이버 로그인 페이지입니다: {final_url}")
+                return best_records
 
         # 1) smartstore 로 바로 간 경우 → 기존 로직 (전체상품 + BEST)
         if final_url.startswith("https://smartstore.naver.com"):
@@ -1324,6 +1448,86 @@ def wait_until_redirect_done(driver, max_wait=10):
     return driver.current_url
 
 
+def is_naver_login_url(url: str) -> bool:
+    url = (url or "").lower()
+    return (
+        "nid.naver.com" in url
+        or "nidlogin.login" in url
+        or "/login" in url and "naver.com" in url
+    )
+
+
+def is_naver_login_page(driver) -> bool:
+    try:
+        if is_naver_login_url(driver.current_url):
+            return True
+    except Exception:
+        pass
+
+    # URL이 아직 스마트스토어처럼 보여도 로그인 폼이 떠 있으면 로그인 화면으로 봅니다.
+    selectors = ("#id", "#pw", "#log\\.login", 'input[name="id"]', 'input[name="pw"]')
+    found = 0
+    for selector in selectors:
+        try:
+            el = driver.find_element(By.CSS_SELECTOR, selector)
+            if el.is_displayed():
+                found += 1
+        except Exception:
+            continue
+    return found >= 2
+
+
+def get_naver_login_credentials():
+    return NAVER_LOGIN_ID, NAVER_LOGIN_PW
+
+
+def set_input_value(driver, selector, value):
+    element = WebDriverWait(driver, 10).until(
+        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+    )
+    driver.execute_script(
+        """
+        const element = arguments[0];
+        const value = arguments[1];
+        element.focus();
+        element.value = value;
+        element.dispatchEvent(new Event('input', { bubbles: true }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+        """,
+        element,
+        value,
+    )
+
+
+def login_to_naver_if_needed(driver, max_wait=15):
+    if not is_naver_login_page(driver):
+        return True
+
+    user_id, user_pw = get_naver_login_credentials()
+    if not user_id or not user_pw:
+        print("[WARN] 네이버 로그인 정보가 GUI에 입력되어 있지 않습니다.")
+        return False
+
+    try:
+        set_input_value(driver, "#id", user_id)
+        time.sleep(0.5)
+        set_input_value(driver, "#pw", user_pw)
+        time.sleep(0.5)
+        driver.find_element(By.CSS_SELECTOR, "#log\\.login").click()
+
+        end_time = time.time() + max_wait
+        while time.time() < end_time:
+            time.sleep(0.5)
+            if not is_naver_login_page(driver):
+                print("[INFO] 네이버 로그인 완료")
+                return True
+        print("[WARN] 네이버 로그인 후에도 로그인 페이지에 머물러 있습니다.")
+        return False
+    except Exception as e:
+        print(f"[WARN] 네이버 자동 로그인 실패: {e}")
+        return False
+
+
 def find_smartstores_in_catalog_page(driver, base_kind, is_brand_catalog, max_malls=50, total_product_limit=None, record_oversize_store=None,category_path=""):
     """
     카탈로그 페이지의 판매처 리스트를 ...
@@ -1385,8 +1589,12 @@ def find_smartstores_in_catalog_page(driver, base_kind, is_brand_catalog, max_ma
                 
                 print(f"[{i+1}/{total_count}] 방문 시도: {mall_name}")
 
-                # 클릭하여 새 탭 열기
-                driver.execute_script("arguments[0].click();", mall_link)
+                # 링크가 현재 카탈로그 탭을 바꾸지 않도록 새 탭으로 엽니다.
+                mall_href = mall_link.get_attribute("href") or ""
+                if mall_href and not mall_href.lower().startswith("javascript:"):
+                    driver.execute_script("window.open(arguments[0], '_blank');", mall_href)
+                else:
+                    driver.execute_script("arguments[0].click();", mall_link)
                 time.sleep(random.uniform(*CLICK_DELAY_RANGE))
 
                 # 탭 전환
@@ -1400,6 +1608,16 @@ def find_smartstores_in_catalog_page(driver, base_kind, is_brand_catalog, max_ma
                     try:
                         # URL 확인
                         final_url = wait_until_redirect_done(driver)
+
+                        if is_naver_login_page(driver):
+                            print(f"   → 네이버 로그인 페이지 감지 ({mall_name}): {final_url}")
+                            if not login_to_naver_if_needed(driver):
+                                print(f"   → 네이버 로그인 실패/미입력으로 건너뜁니다 ({mall_name})")
+                                continue
+                            final_url = wait_until_redirect_done(driver)
+                            if is_naver_login_page(driver):
+                                print(f"   → 로그인 후에도 로그인 페이지라 건너뜁니다 ({mall_name}): {final_url}")
+                                continue
                         
                         if final_url.startswith("https://smartstore.naver.com") or final_url.startswith("https://brand.naver.com"):
                             # print(f"   → 수집 시작 ({mall_name})")
@@ -2541,6 +2759,24 @@ key_label.grid(row=1, column=0, padx=5, pady=5, sticky="e")
 key_entry = ttk.Entry(api_key_frame, width=50)
 key_entry.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
 
+# --- 네이버 로그인 설정 ---
+naver_login_frame = ttk.LabelFrame(left_col, text="네이버 로그인")
+naver_login_frame.pack(fill="x", pady=(0, 10))
+
+naver_id_label = ttk.Label(naver_login_frame, text="아이디:")
+naver_id_label.grid(row=0, column=0, padx=5, pady=5, sticky="e")
+
+naver_id_entry = ttk.Entry(naver_login_frame, width=50)
+naver_id_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+
+naver_pw_label = ttk.Label(naver_login_frame, text="비밀번호:")
+naver_pw_label.grid(row=1, column=0, padx=5, pady=5, sticky="e")
+
+naver_pw_entry = ttk.Entry(naver_login_frame, width=50, show="*")
+naver_pw_entry.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+
+naver_login_frame.columnconfigure(1, weight=1)
+
 # 2. 카테고리 필터 선택
 category_frame = ttk.LabelFrame(left_col, text="카테고리 필터 직접 선택")
 category_frame.pack(fill="x", pady=(0, 10))
@@ -2991,6 +3227,14 @@ saved_key = load_saved_api_key()
 if saved_key:
     key_entry.insert(0, saved_key)  # 저장된 키를 자동으로 입력칸에 넣어줌
     api_key=saved_key
+
+saved_naver_id, saved_naver_pw = load_saved_naver_login()
+if saved_naver_id:
+    naver_id_entry.insert(0, saved_naver_id)
+    NAVER_LOGIN_ID = saved_naver_id
+if saved_naver_pw:
+    naver_pw_entry.insert(0, saved_naver_pw)
+    NAVER_LOGIN_PW = saved_naver_pw
 
 # 7. 실행 / 중단 버튼
 button_frame = ttk.Frame(right_col)

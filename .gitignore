@@ -1,6 +1,8 @@
 # secrets
 api_key.json
 dist/api_key.json
+naver_login.json
+dist/naver_login.json
 .env
 
 # build artifacts
