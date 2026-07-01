@@ -15,6 +15,31 @@ from captcha.api import (
 ###############################################################
 # 3. 캡챠 이미지 Base64 안정적으로 로딩
 ###############################################################
+def find_captcha_input(driver):
+    """
+    캡챠 정답 입력창을 찾습니다.
+    네이버 캡챠는 id가 rcpt_answer 또는 rcpt_answer_랜덤값 형태로 바뀔 수 있습니다.
+    """
+    selectors = [
+        (By.ID, "rcpt_answer"),
+        (By.CSS_SELECTOR, 'input[name="captcha"]'),
+        (By.CSS_SELECTOR, 'input[id^="rcpt_answer"]'),
+        (By.CSS_SELECTOR, 'input[placeholder*="정답"]'),
+        (By.CSS_SELECTOR, 'input[title="정답"]'),
+    ]
+
+    last_error = None
+    for by, selector in selectors:
+        try:
+            return driver.find_element(by, selector)
+        except Exception as e:
+            last_error = e
+
+    if last_error:
+        raise last_error
+    raise NoSuchElementException("캡챠 정답 입력창을 찾을 수 없습니다.")
+
+
 def get_captcha_image_base64(driver,CLICK_DELAY_RANGE):
     """
     rcpt_img가 로딩될 때까지 반복 확인하며 base64 추출.
@@ -112,7 +137,7 @@ def check_fail(before_img,driver):
     # 2) [입력창 초기화 감지] 가장 강력한 힌트
     # 방금 값을 입력했는데, 현재 value가 비어있다면 실패해서 리셋된 것임.
     try:
-        input_box = driver.find_element(By.ID, "rcpt_answer")
+        input_box = find_captcha_input(driver)
         current_val = input_box.get_attribute("value")
         
         # 입력창이 여전히 화면에 보이고 + 값이 비어있다면 -> 실패
@@ -185,7 +210,7 @@ def try_captcha(driver,client,MAX_RETRY,CLICK_DELAY_RANGE,api_key=None):
 
         # 4. 입력 및 제출
         try:
-            input_box = driver.find_element(By.ID, "rcpt_answer")
+            input_box = find_captcha_input(driver)
             input_box.clear()
             input_box.send_keys(answer)
             
@@ -212,7 +237,7 @@ def try_captcha(driver,client,MAX_RETRY,CLICK_DELAY_RANGE,api_key=None):
         # (B) 캡챠 입력창이 "여전히 존재하는가?" 확인
         try:
             # 3초가 지났는데도 입력창을 찾을 수 있다? -> 아직 페이지가 안 넘어감 -> 실패!
-            remain_input = driver.find_element(By.ID, "rcpt_answer")
+            remain_input = find_captcha_input(driver)
             
             # 값을 확인해봅니다 (틀리면 보통 지워짐)
             if remain_input.get_attribute("value") == "":
@@ -252,7 +277,7 @@ def is_captcha_page(driver):
         pass
 
     # 2) 대표적인 캡챠 요소(id)들 체크
-    for elem_id in ("rcpt_img", "rcpt_answer", "cpt_confirm"):
+    for elem_id in ("rcpt_img", "cpt_confirm"):
         try:
             driver.find_element(By.ID, elem_id)
             return True
@@ -260,6 +285,14 @@ def is_captcha_page(driver):
             continue
         except Exception:
             continue
+
+    try:
+        find_captcha_input(driver)
+        return True
+    except NoSuchElementException:
+        pass
+    except Exception:
+        pass
 
     return False
 
@@ -284,4 +317,3 @@ def handle_captcha_if_needed(driver,client,MAX_RETRY,CLICK_DELAY_RANGE,api_key):
 
     print("[INFO] 캡챠가 사라졌습니다. 계속 진행합니다.")
     return True
-

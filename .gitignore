@@ -1,6 +1,6 @@
 # secrets
-api_key.txt
-dist/api_key.txt
+api_key.json
+dist/api_key.json
 .env
 
 # build artifacts

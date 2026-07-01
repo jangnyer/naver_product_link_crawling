@@ -6,11 +6,10 @@ import tkinter as tk
 import threading
 import sys, json, traceback
 import shutil
+import subprocess
 from tkinter import ttk,messagebox
-from selenium import webdriver
+import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 from datetime import datetime
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -20,7 +19,7 @@ from urllib.parse import urlparse
 
 from selenium.common.exceptions import NoSuchElementException
 from openai import OpenAI
-from selenium.common.exceptions import WebDriverException
+from selenium.common.exceptions import WebDriverException, SessionNotCreatedException
 from tkinter import filedialog
 
 from selenium.common.exceptions import NoSuchWindowException, InvalidSessionIdException
@@ -135,8 +134,6 @@ CLICK_DELAY_RANGE = (3.0, 7.0)
 
 client = None
 MAX_RETRY = 10  # 최대 재시도 횟수
-
-API_KEY_FILE = "openai_api_key.txt"  # 같은 폴더에 저장될 파일 이름
 
 client = None
 api_key = ""
@@ -908,20 +905,194 @@ def collect_best_from_current_store(driver, base_kind, is_brand_catalog,
 
 
 
-def create_driver():
-    """크롬 드라이버 생성"""
-    options = webdriver.ChromeOptions()
-    options.add_argument("--start-maximized")  # 창 최대화
-        # ✅ 웨일/다른 작업하며 써도 덜 멈추게 하는 옵션들
-    options.add_argument("--disable-features=CalculateNativeWinOcclusion")
+def get_app_storage_dir():
+    if sys.platform.startswith("win"):
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        storage_dir = os.path.join(base, "naver_product_link_crawling")
+    elif sys.platform == "darwin":
+        storage_dir = os.path.join(os.path.expanduser("~/Library/Application Support"), "naver_product_link_crawling")
+    else:
+        storage_dir = os.path.join(os.path.expanduser("~/.local/share"), "naver_product_link_crawling")
+
+    os.makedirs(storage_dir, exist_ok=True)
+    return storage_dir
+
+
+def parse_chrome_major_version(version_text):
+    match = re.search(r"(\d+)\.", version_text or "")
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def get_installed_chrome_info():
+    """
+    설치된 Chrome의 major 버전과 실행 파일 경로를 확인합니다.
+
+    Returns:
+        tuple[int | None, str | None]: Chrome major 버전, Chrome 실행 파일 경로
+    """
+    candidates = []
+    detected_major = None
+
+    if sys.platform == "darwin":
+        candidates.extend([
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        ])
+    elif sys.platform.startswith("win"):
+        try:
+            import winreg
+            registry_locations = [
+                (winreg.HKEY_CURRENT_USER, r"Software\Google\Chrome\BLBeacon"),
+                (winreg.HKEY_LOCAL_MACHINE, r"Software\Google\Chrome\BLBeacon"),
+                (winreg.HKEY_LOCAL_MACHINE, r"Software\WOW6432Node\Google\Chrome\BLBeacon"),
+            ]
+            for hive, key_path in registry_locations:
+                try:
+                    with winreg.OpenKey(hive, key_path) as key:
+                        version, _ = winreg.QueryValueEx(key, "version")
+                    detected_major = parse_chrome_major_version(version)
+                    if detected_major:
+                        break
+                except OSError:
+                    continue
+        except Exception:
+            pass
+
+        for base in [
+            os.environ.get("PROGRAMFILES"),
+            os.environ.get("PROGRAMFILES(X86)"),
+            os.environ.get("LOCALAPPDATA"),
+        ]:
+            if base:
+                candidates.append(os.path.join(base, "Google", "Chrome", "Application", "chrome.exe"))
+    else:
+        candidates.extend(["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"])
+
+    existing_chrome_path = None
+    for chrome_path in candidates:
+        if os.path.sep in chrome_path and not os.path.exists(chrome_path):
+            continue
+        existing_chrome_path = chrome_path
+
+        try:
+            result = subprocess.run(
+                [chrome_path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            continue
+
+        version_text = (result.stdout or result.stderr or "").strip()
+        detected_major = parse_chrome_major_version(version_text)
+        if detected_major:
+            return detected_major, existing_chrome_path
+
+    return detected_major, existing_chrome_path
+
+
+def get_installed_chrome_major_version():
+    major_version, _ = get_installed_chrome_info()
+    return major_version
+
+
+def build_chrome_options():
+    options = uc.ChromeOptions()
+
+    # 기본 옵션 (네이버 쇼핑 호환성 유지)
+    options.add_argument("--window-position=100,100")
+    options.add_argument("--window-size=1400,900")
+    options.add_argument("--profile-directory=Default")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    options.add_argument("--disable-sync")
+    options.add_argument("--disable-signin-promo")
+    options.add_argument("--disable-features=CalculateNativeWinOcclusion,ProfilePickerOnStartup")
     options.add_argument("--disable-background-timer-throttling")
     options.add_argument("--disable-renderer-backgrounding")
     options.add_argument("--disable-backgrounding-occluded-windows")
 
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=options
-    )
+    # 최소한의 봇 감지 우회 (네이버 쇼핑과 호환)
+    options.add_argument("--disable-blink-features=AutomationControlled")
+
+    prefs = {
+        "credentials_enable_service": False,
+        "profile.password_manager_enabled": False,
+        "profile.default_content_setting_values.notifications": 2,
+    }
+    options.add_experimental_option("prefs", prefs)
+
+    return options
+
+
+def build_chrome_kwargs(version_main=None):
+    chrome_major_version, chrome_path = get_installed_chrome_info()
+    if version_main:
+        chrome_major_version = version_main
+
+    chrome_kwargs = {
+        "options": build_chrome_options(),
+        "user_data_dir": os.path.join(get_app_storage_dir(), "chrome_profile"),
+        "use_subprocess": True,
+        "patcher_force_close": True,
+    }
+    if chrome_major_version:
+        chrome_kwargs["version_main"] = chrome_major_version
+    if chrome_path:
+        chrome_kwargs["browser_executable_path"] = chrome_path
+
+    return chrome_kwargs, chrome_major_version
+
+
+def create_driver():
+    """크롬 드라이버 생성"""
+    chrome_kwargs, chrome_major_version = build_chrome_kwargs()
+    if chrome_major_version:
+        gui_log(f"[INFO] Chrome 버전 감지: {chrome_major_version}")
+
+    try:
+        driver = uc.Chrome(**chrome_kwargs)
+    except SessionNotCreatedException as e:
+        match = re.search(r"Current browser version is (\d+)\.", str(e))
+        if match:
+            detected_major = int(match.group(1))
+            gui_log(f"[INFO] Chrome {detected_major} 버전에 맞는 드라이버로 자동 재설정합니다. 잠시만 기다려주세요.")
+            try:
+                chrome_kwargs, _ = build_chrome_kwargs(version_main=detected_major)
+                driver = uc.Chrome(**chrome_kwargs)
+                gui_log("[INFO] Chrome 브라우저 재시작 완료")
+            except Exception as retry_error:
+                gui_log(f"[ERROR] Chrome 브라우저 재시작 실패: {retry_error}")
+                try:
+                    messagebox.showerror(
+                        "Chrome 실행 실패",
+                        "Chrome 버전에 맞는 드라이버로 재시도했지만 브라우저를 열지 못했습니다.\n\n"
+                        f"{retry_error}"
+                    )
+                except Exception:
+                    pass
+                raise
+        else:
+            raise
+
+    # WebDriver 속성 제거는 UC가 기본적으로 처리합니다. 보조 주입은 실패해도 계속 진행합니다.
+    try:
+        handles = driver.window_handles
+        if handles:
+            driver.switch_to.window(handles[0])
+            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+                "source": """
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    });
+                """
+            })
+    except (NoSuchWindowException, WebDriverException) as e:
+        gui_log(f"[WARN] WebDriver 속성 보조 설정 실패 (무시): {e}")
+
     return driver
 
 
@@ -2906,6 +3077,3 @@ auto_fit_to_content()
 
 if __name__ == "__main__":
     root.mainloop()
-
-
-

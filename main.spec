@@ -1,16 +1,40 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_all
+
+
+datas = []
+binaries = []
+hiddenimports = [
+    'captcha.captcha',
+    'captcha.api',
+    'crawling.output_save.output_save',
+    'crawling.output_save.utills',
+    'selenium',
+    'undetected_chromedriver',
+    'openai',
+    'pandas',
+    'openpyxl',
+    'tkinter',
+]
+
+for package in ('selenium', 'undetected_chromedriver'):
+    package_datas, package_binaries, package_hiddenimports = collect_all(package)
+    datas += package_datas
+    binaries += package_binaries
+    hiddenimports += package_hiddenimports
+
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=[],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['torch', 'torchvision', 'torchaudio', 'tensorboard', 'scipy'],
     noarchive=False,
     optimize=0,
 )
