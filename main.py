@@ -1528,6 +1528,62 @@ def login_to_naver_if_needed(driver, max_wait=15):
         return False
 
 
+def collect_catalog_seller_entries(driver):
+    entries = []
+    seen_hrefs = set()
+
+    def add_entry(link, mall_name):
+        try:
+            href = link.get_attribute("href") or ""
+        except Exception:
+            href = ""
+        if not href or href in seen_hrefs:
+            return
+        seen_hrefs.add(href)
+        entries.append({
+            "link": link,
+            "href": href,
+            "name": (mall_name or "").strip(),
+        })
+
+    for row in driver.find_elements(By.CSS_SELECTOR, 'tbody tr'):
+        try:
+            mall_link = row.find_element(By.CSS_SELECTOR, 'a[class^="productByMall_mall__"]')
+        except Exception:
+            continue
+
+        mall_name = ""
+        try:
+            img = mall_link.find_element(By.TAG_NAME, "img")
+            mall_name = img.get_attribute("alt").strip()
+        except Exception:
+            mall_name = mall_link.text.strip()
+
+        add_entry(mall_link, mall_name)
+
+    for item in driver.find_elements(By.CSS_SELECTOR, 'div[class*="product_seller_item__"]'):
+        try:
+            mall_link = item.find_element(By.CSS_SELECTOR, 'a[class*="product_link_seller__"][href]')
+        except Exception:
+            continue
+
+        mall_name = ""
+        try:
+            mall_name = item.find_element(
+                By.CSS_SELECTOR,
+                'div[class*="product_mall_info__"] span[class*="product_name__"]'
+            ).text.strip()
+        except Exception:
+            try:
+                mall_name = item.find_element(By.CSS_SELECTOR, 'span[class*="product_name__"]').text.strip()
+            except Exception:
+                mall_name = mall_link.text.strip()
+
+        add_entry(mall_link, mall_name)
+
+    return entries
+
+
 def find_smartstores_in_catalog_page(driver, base_kind, is_brand_catalog, max_malls=50, total_product_limit=None, record_oversize_store=None,category_path=""):
     """
     카탈로그 페이지의 판매처 리스트를 ...
@@ -1542,11 +1598,14 @@ def find_smartstores_in_catalog_page(driver, base_kind, is_brand_catalog, max_ma
         print("[INFO] 브랜드 카탈로그 모드가 'none'이라 카탈로그 판매처는 수집하지 않습니다.")
         return []
 
-    # 1. 전체 행(Row) 개수를 먼저 파악
+    # 1. 전체 판매처 개수를 먼저 파악
     try:
-        initial_rows = driver.find_elements(By.CSS_SELECTOR, 'tbody tr')
-        total_count = len(initial_rows)
+        initial_entries = collect_catalog_seller_entries(driver)
+        total_count = len(initial_entries)
     except Exception:
+        print("[INFO] 판매처 리스트를 찾을 수 없습니다.")
+        return []
+    if total_count <= 0:
         print("[INFO] 판매처 리스트를 찾을 수 없습니다.")
         return []
     
@@ -1563,24 +1622,16 @@ def find_smartstores_in_catalog_page(driver, base_kind, is_brand_catalog, max_ma
 
         try:
             # ★ 중요: 탭을 갔다오면 DOM이 불안정해지므로 매번 다시 찾습니다.
-            current_rows = driver.find_elements(By.CSS_SELECTOR, 'tbody tr')
-            if i >= len(current_rows):
+            current_entries = collect_catalog_seller_entries(driver)
+            if i >= len(current_entries):
                 break # 리스트가 줄어들었거나 변경된 경우 중단
-            
-            row = current_rows[i]
+
+            entry = current_entries[i]
 
             # --- 여기서부터 기존 필터링 로직 ---
             try:
-                # 몰 링크 찾기
-                mall_link = row.find_element(By.CSS_SELECTOR, 'a[class^="productByMall_mall__"]')
-                
-                # 몰 이름 확인 (이미지 alt 또는 텍스트)
-                mall_name = ""
-                try:
-                    img = mall_link.find_element(By.TAG_NAME, "img")
-                    mall_name = img.get_attribute("alt").strip()
-                except Exception:
-                    mall_name = mall_link.text.strip()
+                mall_link = entry["link"]
+                mall_name = entry["name"]
 
                 # 오픈마켓 필터링 (G마켓, 옥션, 쿠팡 등 스킵)
                 if any(skip_mall in mall_name for skip_mall in SKIP_MALL_ALTS):
@@ -1590,7 +1641,7 @@ def find_smartstores_in_catalog_page(driver, base_kind, is_brand_catalog, max_ma
                 print(f"[{i+1}/{total_count}] 방문 시도: {mall_name}")
 
                 # 링크가 현재 카탈로그 탭을 바꾸지 않도록 새 탭으로 엽니다.
-                mall_href = mall_link.get_attribute("href") or ""
+                mall_href = entry["href"]
                 if mall_href and not mall_href.lower().startswith("javascript:"):
                     driver.execute_script("window.open(arguments[0], '_blank');", mall_href)
                 else:
